@@ -1,0 +1,41 @@
+# pi05 + LIBERO 微调的统一配置。
+# 命令行只传 --config 指向本文件，其余超参数一律在这里改，不硬编码。
+
+device:
+  type: cuda            # cuda | npu；backend.py 据此选 nccl/hccl、autocast 等
+  dtype: bfloat16       # 训练混合精度
+
+model:
+  # 结构超参数以 ref/openpi 的 pi05 为准，不自行发明。
+  image_size: 224
+  num_cameras: 2        # LIBERO 常用 agentview + wrist 两路
+  action_horizon: 32    # SE(3) delta 动作的 chunk 长度（动作表示见 se3.py，与 pi05 默认 50 不同）
+  action_dim: 32        # pi05 动作专家的动作维度上限（含 padding）
+  state_dim: 32
+
+data:
+  repo_id: libero       # 仅作标识；实际从本地路径加载
+  root: /home/ivoryseagull/neat-pi-old/data/lerobot/libero
+  batch_size: 8
+  num_workers: 4
+  # 预处理管线用本项目自己的声明式 JSON（步骤含自写 GemmaTokenizerStep）；
+  # normalizer 统计 / tokenizer 词表仍从 finetuned checkpoint 目录取，保证与权重训练时一致
+  preprocessor_path: configs/pi05_libero_preprocessor.json
+  postprocessor_path: configs/pi05_libero_postprocessor.json
+  tokenizer_path: /home/ivoryseagull/neat-pi-old/checkpoints/pi05_libero_finetuned/tokenizer.json
+  max_token_len: 200    # pi05 约定（openpi pi0_config: pi05 分支 max_token_len=200）
+
+training:
+  # pretrained 为 null 表示从零训练（结构随机初始化，仅用于冒烟测试）
+  # 注意：该 checkpoint 按 8 维 state + 7 维 action + MEAN_STD 训练，与当前
+  # SE(3) delta / rot6D 数据表示（见 se3.py）不匹配，加载它训练前需先对齐表示
+  pretrained: /home/ivoryseagull/neat-pi-old/checkpoints/pi05_libero_finetuned
+  max_steps: 10000
+  lr: 2.5e-5
+  weight_decay: 0.0
+  log_every: 10
+  save_every: 1000
+  output_dir: outputs/pi05_libero
+  fsdp:
+    sharding_strategy: full_shard   # full_shard | shard_grad_op | no_shard
+    use_orig_params: true           # MoT 结构下配合 auto_wrap 使用

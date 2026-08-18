@@ -1,0 +1,82 @@
+{
+  "name": "policy_preprocessor",
+  "steps": [
+    {
+      "registry_name": "rename_observations_processor",
+      "config": {
+        "rename_map": {}
+      }
+    },
+    {
+      "registry_name": "to_batch_processor",
+      "config": {}
+    },
+    {
+      "class": "neat_pi.data.se3_processor.SE3StateActionStep",
+      "config": {
+        "action_horizon": 32
+      }
+    },
+    {
+      "registry_name": "normalizer_processor",
+      "config": {
+        "eps": 1e-08,
+        "features": {
+          "observation.images.image": {
+            "type": "VISUAL",
+            "shape": [
+              3,
+              256,
+              256
+            ]
+          },
+          "observation.images.image2": {
+            "type": "VISUAL",
+            "shape": [
+              3,
+              256,
+              256
+            ]
+          },
+          "observation.state": {
+            "type": "STATE",
+            "shape": [
+              11
+            ]
+          },
+          "action": {
+            "type": "ACTION",
+            "shape": [
+              10
+            ]
+          }
+        },
+        "norm_map": {
+          "ACTION": "QUANTILES",
+          "STATE": "QUANTILES",
+          "VISUAL": "IDENTITY"
+        }
+      },
+      "state_file": "pi05_libero_se3_stats.safetensors"
+    },
+    {
+      "registry_name": "pi05_prepare_state_tokenizer_processor_step",
+      "config": {}
+    },
+    {
+      "class": "neat_pi.data.tokenizer.GemmaTokenizerStep",
+      "config": {
+        "tokenizer_path": "/home/ivoryseagull/neat-pi-old/checkpoints/pi05_libero_finetuned/tokenizer.json",
+        "max_length": 200,
+        "task_key": "task"
+      }
+    },
+    {
+      "registry_name": "device_processor",
+      "config": {
+        "device": "cpu",
+        "float_dtype": null
+      }
+    }
+  ]
+}

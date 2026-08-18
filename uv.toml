@@ -1,0 +1,6 @@
+# 项目命令（uv sync / uv lock / uv run）走阿里云 PyPI 镜像
+index-url = "https://mirrors.aliyun.com/pypi/simple/"
+
+[pip]
+# uv pip 子命令单独读这一段
+index-url = "https://mirrors.aliyun.com/pypi/simple/"

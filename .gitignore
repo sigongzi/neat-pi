@@ -1,0 +1,20 @@
+/docs/xin-*
+/docs/plan/
+/AGENTS.md
+/tmp_scripts/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 训练产出
+checkpoints/
+outputs/
+logs/
+
+models/
