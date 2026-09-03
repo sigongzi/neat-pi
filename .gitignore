@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-ref/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -18,3 +19,6 @@ outputs/
 logs/
 
 models/
+
+# 参考代码
+ref/

@@ -18,5 +18,10 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",  # 单元测试（tests/ 目录）
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/neat_pi"]

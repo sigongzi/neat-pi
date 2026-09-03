@@ -131,6 +131,12 @@ class GemmaTokenizerStep(ProcessorStep):
             raise ValueError("tokenizer_path 不能为空：需指向 checkpoint 的 tokenizer.json")
         self._tokenizer = GemmaTokenizer.from_file(self.tokenizer_path)
 
+    @property
+    def tokenizer(self) -> GemmaTokenizer:
+        """本 step 持有的分词器（供脚本侧做 decode 对照等，避免第二份词表来源）。"""
+        assert self._tokenizer is not None
+        return self._tokenizer
+
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         """编码 task 文本，把 token ids / attention mask 写入 observation。"""
         transition = transition.copy()

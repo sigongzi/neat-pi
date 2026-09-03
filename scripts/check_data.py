@@ -47,16 +47,6 @@ def _print_batch(batch: dict[str, Any], indent: str = "  ") -> None:
             logger.info("{}{:<36} {}", indent, key, repr(v)[:100])
 
 
-def _to_float(batch: dict[str, Any]) -> dict[str, Any]:
-    """把仍为 uint8 的图像转成 float/255；已是 float（数据集侧归一化过）则原样保留。"""
-    out = dict(batch)
-    for key, v in out.items():
-        if key.startswith("observation.images.") and isinstance(v, torch.Tensor) \
-                and v.dtype == torch.uint8:
-            out[key] = v.float() / 255.0
-    return out
-
-
 def main() -> None:
     """读取配置，取一个 batch 逐步过 preprocessor，打印每步输出形态。"""
     config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/pi05_libero.yaml"
@@ -64,7 +54,8 @@ def main() -> None:
 
     from neat_pi.data.lerobot_dataset import build_dataset
     from neat_pi.data.preprocessor import load_preprocessor
-    from neat_pi.data.tokenizer import GemmaTokenizer
+    from neat_pi.data.tokenizer import GemmaTokenizerStep
+    from neat_pi.data.transforms import images_to_float
 
     ds = build_dataset(cfg.data, cfg.model)
     logger.info("数据集: {} 帧", len(ds))
@@ -76,9 +67,14 @@ def main() -> None:
         shuffle=False,
     )
     pipe = load_preprocessor(cfg)
-    tokenizer = GemmaTokenizer.from_file(cfg.data.tokenizer_path)
+    # 词表的唯一来源是 preprocessor JSON 中的 GemmaTokenizerStep，不在 YAML 重复配置
+    tokenizer = next(
+        (s.tokenizer for s in pipe.steps if isinstance(s, GemmaTokenizerStep)), None
+    )
+    if tokenizer is None:
+        raise ValueError("preprocessor 管线中没有 GemmaTokenizerStep")
 
-    batch = _to_float(next(iter(dl)))
+    batch = images_to_float(next(iter(dl)))
     logger.info("== 原始 batch（collate 后）==")
     _print_batch(batch)
 
@@ -103,7 +99,7 @@ def main() -> None:
     logger.info("== 计时（再迭代 {} 个 batch，含视频解码 + 整条管线）==", 3)
     t0 = time.perf_counter()
     for _ in range(3):
-        pipe(_to_float(next(iter(dl))))
+        pipe(images_to_float(next(iter(dl))))
     dt = (time.perf_counter() - t0) / 3
     logger.info("平均每 batch 耗时: {:.2f}s", dt)
 

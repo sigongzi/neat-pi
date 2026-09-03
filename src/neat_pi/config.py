@@ -43,7 +43,6 @@ class DataConfig:
     num_workers: int = 4
     preprocessor_path: str = ""  # 本项目 policy_preprocessor.json 的文件路径
     postprocessor_path: str = ""  # 本项目 policy_postprocessor.json（推理侧 unnormalize + delta→指令）
-    tokenizer_path: str = ""     # checkpoint 的 tokenizer.json
     max_token_len: int = 200     # pi05 的 prompt token 长度（openpi pi0_config）
     video_backend: str = "pyav"  # 视频解码后端；显式指定以跳过 torchcodec 探测告警
 
@@ -61,6 +60,7 @@ class TrainingConfig:
     """训练超参数与 FSDP 子配置。"""
 
     pretrained: str | None = None  # pi05 checkpoint 路径；None = 从零训练
+    use_dummy_model: bool = True   # True=用 DummyPi05 冒烟跑通训练循环；Pi05.predict_velocity 实现后改 False
     max_steps: int = 10000
     lr: float = 2.5e-5
     weight_decay: float = 0.0

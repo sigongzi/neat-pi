@@ -11,18 +11,19 @@
 from __future__ import annotations
 
 import torch
-from torch import nn
 
 from neat_pi.config import ModelConfig
 from neat_pi.model.action_expert import ActionExpert
-from neat_pi.model.gemma import GemmaEmbedding, GemmaFinalNorm
+from neat_pi.model.flow_matching import FlowMatchingModel
+from neat_pi.model.gemma import GemmaEmbedding
+from neat_pi.model.modules import RMSNorm
 from neat_pi.model.mot import MoTStack
 from neat_pi.model.siglip import SigLIPVisionEncoder
 from neat_pi.typing import (ActionBHD, ImageBCHW, StateBD, TimeB, TokenIdsBL,
                             typechecked)
 
 
-class Pi05(nn.Module):
+class Pi05(FlowMatchingModel):
     """pi05 视觉-语言-动作模型（flow matching 训练形态）。"""
 
     def __init__(self, cfg: ModelConfig) -> None:
@@ -33,7 +34,7 @@ class Pi05(nn.Module):
         self.mot = MoTStack(num_layers=18)  # 层数以 openpi pi05 配置为准
         self.action_expert = ActionExpert(
             state_dim=cfg.state_dim, action_dim=cfg.action_dim)
-        self.final_norm = GemmaFinalNorm()
+        self.final_norm = RMSNorm(2048)  # VLM 侧输出前的 final norm
 
     @classmethod
     def from_pretrained(cls, checkpoint_dir: str, cfg: ModelConfig,
@@ -46,8 +47,9 @@ class Pi05(nn.Module):
         return model.to(device)
 
     @typechecked
-    def forward(self, images: ImageBCHW, token_ids: TokenIdsBL,
-                state: StateBD, noisy_action: ActionBHD, t: TimeB) -> ActionBHD:
+    def predict_velocity(self, images: list[ImageBCHW],
+                         token_ids: TokenIdsBL, state: StateBD,
+                         noisy_action: ActionBHD, t: TimeB) -> ActionBHD:
         """训练前向：预测带噪动作的速度场。
 
         images 为多相机图像在 batch 维拼接后的形态（具体排布待数据管线定）。
@@ -57,7 +59,7 @@ class Pi05(nn.Module):
         raise NotImplementedError("待实现：见各子模块 TODO")
 
     @torch.no_grad()
-    def sample_actions(self, images: ImageBCHW, token_ids: TokenIdsBL,
+    def sample_actions(self, images: list[ImageBCHW], token_ids: TokenIdsBL,
                        state: StateBD, num_steps: int = 10) -> ActionBHD:
         """推理：从噪声出发用 Euler 法积分 flow ODE，返回动作 chunk。
 

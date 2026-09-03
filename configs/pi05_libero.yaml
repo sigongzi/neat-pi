@@ -20,12 +20,15 @@ data:
   num_workers: 4
   # 预处理管线用本项目自己的声明式 JSON（步骤含自写 GemmaTokenizerStep）；
   # normalizer 统计 / tokenizer 词表仍从 finetuned checkpoint 目录取，保证与权重训练时一致
+  # （tokenizer 词表路径只在 preprocessor JSON 的 GemmaTokenizerStep 里声明，此处不重复）
   preprocessor_path: configs/pi05_libero_preprocessor.json
   postprocessor_path: configs/pi05_libero_postprocessor.json
-  tokenizer_path: /home/ivoryseagull/neat-pi-old/checkpoints/pi05_libero_finetuned/tokenizer.json
   max_token_len: 200    # pi05 约定（openpi pi0_config: pi05 分支 max_token_len=200）
 
 training:
+  # use_dummy_model: true 时用 DummyPi05 跑通训练循环（数据->loss->反向->保存），
+  # Pi05.predict_velocity 实现后置 false 走真实模型
+  use_dummy_model: true
   # pretrained 为 null 表示从零训练（结构随机初始化，仅用于冒烟测试）
   # 注意：该 checkpoint 按 8 维 state + 7 维 action + MEAN_STD 训练，与当前
   # SE(3) delta / rot6D 数据表示（见 se3.py）不匹配，加载它训练前需先对齐表示

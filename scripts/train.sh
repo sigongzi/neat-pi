@@ -23,4 +23,4 @@ exec uv run torchrun \
     --node_rank="${NODE_RANK}" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-    -m neat_pi.training.trainer --config "${CONFIG}"
+    scripts/train.py --config "${CONFIG}"

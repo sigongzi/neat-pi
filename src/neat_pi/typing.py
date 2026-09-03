@@ -19,11 +19,20 @@ ImageBCHW = TensorType["batch", "channels", "height", "width"]
 # 视觉 token 序列（SigLIP 输出 / 进入 transformer 的通用形态）：[batch, num_tokens, dim]
 TokensBTD = TensorType["batch", "num_tokens", "dim"]
 
+# 语言模型输出的 logits：[batch, seq, vocab]
+LogitsBSV = TensorType["batch", "seq", "vocab"]
+
 # 文本 token id：[batch, seq_len]，整型
 TokenIdsBL = TensorType["batch", "seq_len", torch.long]
 
 # 文本 padding mask：[batch, seq_len]，True 表示有效 token
 MaskBL = TensorType["batch", "seq_len", torch.bool]
+
+# 动作 chunk 的时间步 padding mask：[batch, action_horizon]，True 表示有效步
+MaskBH = TensorType["batch", "action_horizon", torch.bool]
+
+# 标量损失（0 维张量）
+ScalarLoss = TensorType[()]
 
 # 机器人状态向量：[batch, state_dim]
 StateBD = TensorType["batch", "state_dim"]
@@ -33,3 +42,6 @@ ActionBHD = TensorType["batch", "action_horizon", "action_dim"]
 
 # flow matching 的连续时间步：[batch]
 TimeB = TensorType["batch"]
+
+# adaRMS 的条件向量（时间嵌入 MLP 的输出）：[batch, cond_dim]
+CondBD = TensorType["batch", "cond_dim"]
