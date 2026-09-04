@@ -22,7 +22,7 @@ from lerobot.processor import (EnvTransition, ProcessorStep,  # noqa: F401
 from lerobot.utils.constants import (OBS_LANGUAGE_ATTENTION_MASK,
                                      OBS_LANGUAGE_TOKENS)
 
-from neat_pi.typing import MaskBL, TokenIdsBL, typechecked
+from neat_pi.typing import AttentionMaskBL, TokenIdsBL, typechecked
 
 
 class GemmaTokenizer:
@@ -90,7 +90,7 @@ class GemmaTokenizer:
 
     @typechecked
     def encode_batch(self, texts: list[str],
-                     max_len: int) -> tuple[TokenIdsBL, MaskBL]:
+                     max_len: int) -> tuple[TokenIdsBL, AttentionMaskBL]:
         """批量编码，返回 (token_ids [B, L], attention_mask [B, L])，mask True=有效。"""
         rows = [self.encode(t, max_len) for t in texts]
         ids = torch.tensor(rows, dtype=torch.long)

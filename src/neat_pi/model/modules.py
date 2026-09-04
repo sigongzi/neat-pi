@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from neat_pi.typing import CondBD, TokensBTD, typechecked
+from neat_pi.typing import CondBD, GateB1D, TokensBTD, VisionTokensBTD, typechecked
 
 
 class RMSNorm(nn.Module):
@@ -46,7 +46,7 @@ class LayerNorm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(dim))
 
     @typechecked
-    def forward(self, x: TokensBTD) -> TokensBTD:
+    def forward(self, x: VisionTokensBTD) -> VisionTokensBTD:
         return F.layer_norm(x.float(), (x.shape[-1],), self.weight.float(),
                             self.bias.float(), self.eps).to(x.dtype)
 
@@ -76,7 +76,7 @@ class AdaLayerNorm(nn.Module):
         nn.init.zeros_(self.dense.bias)
 
     @typechecked
-    def forward(self, x: TokensBTD, cond: CondBD) -> tuple[TokensBTD, TokensBTD]:
+    def forward(self, x: TokensBTD, cond: CondBD) -> tuple[TokensBTD, GateB1D]:
         """返回 (norm 后的 x, gate)；gate 形状 [batch, 1, dim]，供残差处广播相乘。"""
         dtype = x.dtype
         normed = x.float()

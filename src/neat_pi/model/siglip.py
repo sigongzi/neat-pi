@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from neat_pi.model.modules import LayerNorm
-from neat_pi.typing import ImageBCHW, TokensBTD, typechecked
+from neat_pi.typing import ImageBCHW, VisionTokensBTD, typechecked
 
 
 class SiglipMLP(nn.Module):
@@ -37,7 +37,7 @@ class SiglipMLP(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, dim, bias=True)
 
     @typechecked
-    def forward(self, x: TokensBTD) -> TokensBTD:
+    def forward(self, x: VisionTokensBTD) -> VisionTokensBTD:
         return self.fc2(F.gelu(self.fc1(x), approximate="tanh"))
 
 
@@ -55,7 +55,7 @@ class SiglipAttention(nn.Module):
         self.out_proj = nn.Linear(dim, dim, bias=True)
 
     @typechecked
-    def forward(self, x: TokensBTD) -> TokensBTD:
+    def forward(self, x: VisionTokensBTD) -> VisionTokensBTD:
         """[batch, seq, dim] -> [batch, seq, dim]，无 causal mask。"""
         batch, seq, _ = x.shape
         q = self.q_proj(x).view(batch, seq, self.num_heads, self.head_dim).transpose(1, 2)
@@ -79,7 +79,7 @@ class SiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(dim, mlp_hidden)
 
     @typechecked
-    def forward(self, x: TokensBTD) -> TokensBTD:
+    def forward(self, x: VisionTokensBTD) -> VisionTokensBTD:
         x = x + self.self_attn(self.layer_norm1(x))
         x = x + self.mlp(self.layer_norm2(x))
         return x
@@ -105,7 +105,7 @@ class SiglipVisionEmbeddings(nn.Module):
         )
 
     @typechecked
-    def forward(self, image: ImageBCHW) -> TokensBTD:
+    def forward(self, image: ImageBCHW) -> VisionTokensBTD:
         """图像批次 -> [batch, num_patches, width]。"""
         embeds = self.patch_embedding(image)  # [batch, width, grid, grid]
         embeds = embeds.flatten(2).transpose(1, 2)  # [batch, num_patches, width]
@@ -124,7 +124,7 @@ class SiglipEncoder(nn.Module):
         )
 
     @typechecked
-    def forward(self, x: TokensBTD) -> TokensBTD:
+    def forward(self, x: VisionTokensBTD) -> VisionTokensBTD:
         for layer in self.layers:
             x = layer(x)
         return x
@@ -156,7 +156,7 @@ class SigLIPVisionEncoder(nn.Module):
         self.post_layernorm = LayerNorm(width, eps)
 
     @typechecked
-    def forward(self, image: ImageBCHW) -> TokensBTD:
+    def forward(self, image: ImageBCHW) -> VisionTokensBTD:
         """图像批次 -> [batch, num_patches, width] 的视觉 token 序列。"""
         hidden = self.embeddings(image)
         hidden = self.encoder(hidden)

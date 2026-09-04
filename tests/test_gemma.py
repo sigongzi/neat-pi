@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 import torch
-import torch.nn.functional as F
 
-from neat_pi.model.gemma import (GemmaAttention, GemmaLM, apply_rotary_pos_emb,
-                                 build_rope_cache, rotate_half)
+from neat_pi.model.gemma import GemmaAttention, GemmaLM
+from neat_pi.model.util import (apply_rotary_pos_emb, build_rope_cache,
+                                rotate_half)
 from neat_pi.model.weights import translate_gemma_lm_name
 
 CHECKPOINT = Path("/home/ivoryseagull/neat-pi-old/checkpoints/"
@@ -24,7 +24,7 @@ CHECKPOINT = Path("/home/ivoryseagull/neat-pi-old/checkpoints/"
 def _small_lm() -> GemmaLM:
     """小而完整的 GemmaLM，用于快速形状/梯度/生成测试。"""
     return GemmaLM(vocab_size=64, width=64, num_layers=2, num_heads=4,
-                   num_kv_heads=1, head_dim=16, mlp_hidden=128)
+                   num_kv_heads=1, attn_head_dim=16, mlp_hidden=128)
 
 
 def _naive_attention(x: torch.Tensor, attn: GemmaAttention,
@@ -105,38 +105,59 @@ def test_gemma_attention_gradient_flows() -> None:
 
 
 def test_gemma_lm_logits_shape() -> None:
-    """输入 [batch, seq]，输出 [batch, seq, vocab]。"""
+    """输入 embedding [batch, seq, dim]，输出 [batch, seq, vocab]。"""
     lm = _small_lm()
-    ids = torch.randint(0, 64, (2, 7))
-    assert lm(ids).shape == (2, 7, 64)
+    x = torch.randn(2, 7, 64)
+    assert lm(x).shape == (2, 7, 64)
 
 
 def test_gemma_lm_gradient_flows() -> None:
     """反向传播后 lm_head / 层内参数都有梯度。"""
     lm = _small_lm()
-    lm(torch.randint(0, 64, (2, 7))).sum().backward()
+    lm(torch.randn(2, 7, 64)).sum().backward()
     assert lm.lm_head.weight.grad is not None
     assert lm.layers[0].self_attn.q_proj.weight.grad is not None
     assert lm.layers[0].mlp.gate_proj.weight.grad is not None
 
 
-def test_gemma_lm_generate_grows_sequence() -> None:
-    """贪心生成返回更长序列，且长度为 prompt + max_new_tokens（随机权重不会遇 eos）。"""
-    lm = _small_lm()
-    ids = torch.randint(0, 64, (1, 3))
-    out = lm.generate(ids, max_new_tokens=5)
-    assert out.shape[1] == 8
-    assert torch.equal(out[:, :3], ids)
+# ---------------- prefill（KV cache 通路） ----------------
 
 
-def test_gemma_lm_tied_embedding_is_lm_head() -> None:
-    """embedding 直接查 lm_head.weight，二者是同一份参数。"""
+def test_prefill_kv_shapes() -> None:
+    """prefill 返回每层一对 (k, v)，保持 1 kv 头原形态。"""
     lm = _small_lm()
-    ids = torch.randint(0, 64, (1, 4))
-    emb = F.embedding(ids, lm.lm_head.weight)
-    # 默认构造下 lm_head.weight 就是唯一 embedding 来源（无独立 embed_tokens）
-    assert not hasattr(lm, "embed_tokens")
-    assert torch.equal(emb, lm.lm_head.weight[ids])
+    cache = lm.prefill(torch.randn(2, 7, 64))
+    assert len(cache) == 2
+    for k, v in cache:
+        assert k.shape == (2, 1, 7, 16)
+        assert v.shape == (2, 1, 7, 16)
+
+
+def test_prefill_hidden_matches_forward() -> None:
+    """同一层：显式 causal mask 的 prefill 隐状态与 is_causal 的 forward 一致。"""
+    torch.manual_seed(0)
+    layer = _small_lm().layers[0]
+    x = torch.randn(2, 7, 64)
+    cos, sin = build_rope_cache(7, 16, 10_000.0, x.device, x.dtype)
+    causal = torch.tril(torch.ones(7, 7, dtype=torch.bool))
+    x_prefill, _ = layer.prefill(x, cos, sin, causal[None, None])
+    x_forward = layer.forward(x, cos, sin, is_causal=True)
+    assert torch.allclose(x_prefill, x_forward, atol=1e-5)
+
+
+def test_prefill_kv_matches_project_qkv() -> None:
+    """缓存的 (k, v) 与各层 forward 内部的 project_qkv 输出逐元素一致。"""
+    torch.manual_seed(0)
+    lm = _small_lm()
+    x = torch.randn(2, 7, 64)
+    cache = lm.prefill(x)
+    cos, sin = build_rope_cache(7, 16, 10_000.0, x.device, x.dtype)
+    h = x
+    for i, layer in enumerate(lm.layers):
+        _, k, v = layer.self_attn.project_qkv(layer.input_layernorm(h), cos, sin)
+        assert torch.allclose(cache[i][0], k, atol=1e-6)
+        assert torch.allclose(cache[i][1], v, atol=1e-6)
+        h = layer(h, cos, sin, is_causal=False)
 
 
 # ---------------- checkpoint 名字映射（不实例化真实模型） ----------------

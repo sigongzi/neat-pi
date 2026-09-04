@@ -104,7 +104,8 @@ def load_siglip_vision_weights(model: nn.Module, checkpoint_dir: str) -> int:
 
 
 # VLM 语言主干在 checkpoint 里的位置：层/norm 在 `...language_model.*` 下，
-# tied 的 lm_head 单独在 `...paligemma.lm_head.weight`（没有独立 embed_tokens）。
+# tied 的 lm_head 单独在 `...paligemma.lm_head.weight`（checkpoint 里没有独立
+# embed_tokens；token embedding 由调用方查 lm_head.weight 得到）。
 _GEMMA_LM_LAYERS_PREFIX = "language_model."
 _GEMMA_LM_HEAD_SUFFIX = "paligemma.lm_head.weight"
 

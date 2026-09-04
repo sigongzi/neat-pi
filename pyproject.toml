@@ -21,6 +21,7 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=8.0",  # 单元测试（tests/ 目录）
+    "matplotlib>=3.8",  # 子任务探测可视化（tmp_scripts/vis_subtask_probe.py）
 ]
 
 [tool.hatch.build.targets.wheel]

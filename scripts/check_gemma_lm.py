@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 
 import torch
+import torch.nn.functional as F
 from loguru import logger
 
 from neat_pi.config import load_config
@@ -83,13 +84,19 @@ def main() -> None:
     # 词表只来自 checkpoint 的 tokenizer.json（与权重同源）
     tokenizer = GemmaTokenizer.from_file(f"{checkpoint_dir}/tokenizer.json")
     ids = [t for t in tokenizer.encode(args.prompt, max_len=256) if t != tokenizer.pad_id]
-    input_ids = torch.tensor([ids], device=device)
     logger.info("prompt: {!r} -> {} token", args.prompt, len(ids))
 
+    # 贪心续写：token -> tied embedding（乘 sqrt(width)）-> GemmaLM -> argmax。
+    gen = list(ids)
     with torch.inference_mode():
-        output_ids = model.generate(input_ids, max_new_tokens=args.max_new_tokens,
-                                    eos_id=tokenizer.eos_id)
-    generated = tokenizer.decode(output_ids[0])
+        for _ in range(args.max_new_tokens):
+            cur = torch.tensor([gen], device=device)
+            x = F.embedding(cur, model.lm_head.weight) * (model.width ** 0.5)
+            nxt = int(model(x)[0, -1].argmax(dim=-1))
+            gen.append(nxt)
+            if nxt == tokenizer.eos_id:
+                break
+    generated = tokenizer.decode(gen)
     logger.info("生成结果: {!r}", generated)
 
 

@@ -193,11 +193,11 @@ def _run_reference(ref: torch.nn.Module, ids: torch.Tensor) -> dict[str, torch.T
 
 def _run_ours(model: torch.nn.Module, ids: torch.Tensor) -> dict[str, torch.Tensor]:
     """跑本地 GemmaLM（逐层手动循环），返回与参考相同的输出集合。"""
-    from neat_pi.model.gemma import build_rope_cache
+    from neat_pi.model.util import build_rope_cache
 
     with torch.inference_mode():
         embed = F.embedding(ids, model.lm_head.weight)
-        cos, sin = build_rope_cache(ids.shape[1], model.head_dim, model.theta,
+        cos, sin = build_rope_cache(ids.shape[1], model.attn_head_dim, model.theta,
                                     ids.device, embed.dtype)
         x = embed
         layers = []
