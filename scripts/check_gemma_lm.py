@@ -86,12 +86,12 @@ def main() -> None:
     ids = [t for t in tokenizer.encode(args.prompt, max_len=256) if t != tokenizer.pad_id]
     logger.info("prompt: {!r} -> {} token", args.prompt, len(ids))
 
-    # 贪心续写：token -> tied embedding（乘 sqrt(width)）-> GemmaLM -> argmax。
+    # 贪心续写：token -> tied embedding（乘 sqrt(hidden_dim)）-> GemmaLM -> argmax。
     gen = list(ids)
     with torch.inference_mode():
         for _ in range(args.max_new_tokens):
             cur = torch.tensor([gen], device=device)
-            x = F.embedding(cur, model.lm_head.weight) * (model.width ** 0.5)
+            x = F.embedding(cur, model.lm_head.weight) * (model.hidden_dim ** 0.5)
             nxt = int(model(x)[0, -1].argmax(dim=-1))
             gen.append(nxt)
             if nxt == tokenizer.eos_id:

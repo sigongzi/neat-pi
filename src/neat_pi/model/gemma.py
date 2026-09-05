@@ -19,7 +19,7 @@ build_rope_cache / gqa_sdpa）在 model/util.py，本文件只 import 不定义�
 - `GemmaLM`：embedding -> N 层 -> final norm -> lm_head 的纯 decoder 主干，
   用于独立验证 checkpoint 里 VLM 主干的权重。它只接受 embedding（`LanguageTokens`）
   输入，不负责 token 层：Gemma 的 token embedding 与 lm_head 是 tied 的同一份
-  `lm_head.weight`，由调用方查表并乘 sqrt(width) 得到。
+  `lm_head.weight`，由调用方查表并乘 sqrt(hidden_dim) 得到。
 - 推理 prefill 通路：`GemmaLM.prefill` / `GemmaDecoderLayer.prefill` 收集
   每层 RoPE 后的 (k, v) 进 `PrefixKVCache`（见 cache.py），不影响训练前向。
 
@@ -118,12 +118,12 @@ class GemmaDecoderLayer(nn.Module):
     """
 
     def __init__(self, dim: int, num_heads: int, num_kv_heads: int,
-                 head_dim: int, mlp_hidden: int, eps: float = 1e-6) -> None:
+                 head_dim: int, mlp_hidden_dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.input_layernorm = RMSNorm(dim, eps)
         self.self_attn = GemmaAttention(dim, num_heads, num_kv_heads, head_dim)
         self.post_attention_layernorm = RMSNorm(dim, eps)
-        self.mlp = MLP(dim, mlp_hidden)
+        self.mlp = MLP(dim, mlp_hidden_dim)
 
     def pre_attn(self, x: LanguageTokensBTD, cos: torch.Tensor,
                  sin: torch.Tensor,
@@ -199,41 +199,41 @@ class GemmaLM(Expert):
     （每层 GemmaDecoderLayer，实现 pre_attn / post_attn 半块接口），顶层
     暴露 num_heads / num_kv_heads / attn_head_dim / theta 供 MoT 校验与透传。
 
-    默认超参数对应 pi05 的 gemma_2b：width 2048 / 18 层 / 8 头 / 1 kv 头 /
+    默认超参数对应 pi05 的 gemma_2b：hidden_dim 2048 / 18 层 / 8 头 / 1 kv 头 /
     attn_head_dim 256 / mlp 16384 / vocab 257152。token embedding 不在本模块里，
-    由调用方查 tied 的 lm_head.weight 并乘 sqrt(width)。
+    由调用方查 tied 的 lm_head.weight 并乘 sqrt(hidden_dim)。
     """
 
-    def __init__(self, vocab_size: int = 257_152, width: int = 2048,
+    def __init__(self, vocab_size: int = 257_152, hidden_dim: int = 2048,
                  num_layers: int = 18, num_heads: int = 8,
                  num_kv_heads: int = 1, attn_head_dim: int = 256,
-                 mlp_hidden: int = 16384, theta: float = 10_000.0,
+                 mlp_hidden_dim: int = 16384, theta: float = 10_000.0,
                  eps: float = 1e-6) -> None:
         super().__init__()
-        self.width = width
+        self.hidden_dim = hidden_dim
         self.attn_head_dim = attn_head_dim
         self.theta = theta
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.layers = nn.ModuleList(
-            GemmaDecoderLayer(width, num_heads, num_kv_heads, attn_head_dim,
-                              mlp_hidden, eps)
+            GemmaDecoderLayer(hidden_dim, num_heads, num_kv_heads, attn_head_dim,
+                              mlp_hidden_dim, eps)
             for _ in range(num_layers)
         )
-        self.norm = RMSNorm(width, eps)
-        self.lm_head = nn.Linear(width, vocab_size, bias=False)
+        self.norm = RMSNorm(hidden_dim, eps)
+        self.lm_head = nn.Linear(hidden_dim, vocab_size, bias=False)
 
     @typechecked
     def embed_language_tokens(self, token_ids: TokenIdsBL) -> LanguageTokensBTD:
-        """查 tied token embedding 并乘 sqrt(width)，得到语言输入 embedding。"""
-        return self.lm_head.weight[token_ids] * self.width ** 0.5
+        """查 tied token embedding 并乘 sqrt(hidden_dim)，得到语言输入 embedding。"""
+        return self.lm_head.weight[token_ids] * self.hidden_dim ** 0.5
 
     @typechecked
     def forward(self, x: LanguageTokensBTD) -> LogitsBSV:
         """embedding [batch, seq, dim] -> logits [batch, seq, vocab]。
 
         只做 transformer + final norm + lm_head；token embedding 由调用方负责
-        （tied 到 lm_head.weight 并乘 sqrt(width)，与 openpi 的 pi0_pytorch
+        （tied 到 lm_head.weight 并乘 sqrt(hidden_dim)，与 openpi 的 pi0_pytorch
         embed_prefix / JAX Embedder.encode 一致）。
         """
         cos, sin = build_rope_cache(x.shape[1], self.attn_head_dim, self.theta,

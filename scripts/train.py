@@ -34,6 +34,7 @@ class TrainBatch(NamedTuple):
     """一个训练 batch 的模型侧形态：action 已补零到模型维度。"""
 
     images: list[torch.Tensor]  # 各相机图像 (B,3,H,W)，[-1,1]
+    image_masks: list[torch.Tensor]  # 各相机可用性 (B,)，True=有效
     token_ids: torch.Tensor     # (B, max_token_len)
     lang_mask: torch.Tensor     # (B, max_token_len)，True=有效语言 token
     actions: torch.Tensor       # (B, action_horizon, action_dim) 补零后
@@ -50,6 +51,9 @@ def prepare_batch(cfg: Config, batch: dict[str, Any],
     """
     images = [batch[k].to(device) for k in sorted(batch)
               if k.startswith("observation.images.")]
+    # 数据集侧还没有统一的相机缺失标记；训练 batch 先默认所有相机有效。
+    image_masks = [torch.ones(image.shape[0], dtype=torch.bool,
+                              device=device) for image in images]
     token_ids = batch["observation.language.tokens"].to(device).long()
     lang_mask = batch["observation.language.attention_mask"].to(device).bool()
     actions = batch["action"].to(device).float()
@@ -59,8 +63,8 @@ def prepare_batch(cfg: Config, batch: dict[str, Any],
 
     real_action_dim = actions.shape[-1]
     actions = F.pad(actions, (0, cfg.model.action_dim - actions.shape[-1]))
-    return TrainBatch(images, token_ids, lang_mask, actions, is_pad,
-                      real_action_dim)
+    return TrainBatch(images, image_masks, token_ids, lang_mask, actions,
+                      is_pad, real_action_dim)
 
 
 def build_model(cfg: Config, ctx: backend.DeviceContext,
@@ -128,8 +132,8 @@ def run_training(config_path: str) -> None:
             batch = next(data_iter)
 
         tb = prepare_batch(cfg, preprocessor(images_to_float(batch)), ctx.device)
-        loss = model(tb.images, tb.token_ids, tb.lang_mask, tb.actions,
-                     tb.is_pad, tb.real_action_dim)
+        loss = model(tb.images, tb.image_masks, tb.token_ids, tb.lang_mask,
+                     tb.actions, tb.is_pad, tb.real_action_dim)
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()

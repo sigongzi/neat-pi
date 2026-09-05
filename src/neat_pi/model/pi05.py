@@ -14,21 +14,21 @@ import torch
 from torch import nn
 
 from neat_pi.config import ModelConfig
-from neat_pi.model.action_expert import ActionExpert
 from neat_pi.model.flow_matching import FlowMatchingModel
-from neat_pi.model.modules import RMSNorm
+from neat_pi.model.gemma import GemmaLM
 from neat_pi.model.siglip import SigLIPVisionEncoder
-from neat_pi.typing import (ActionBHD, ImageBCHW, LanguageTokensBTD, MaskBL,
-                            TimeB, TokenIdsBL, VisionTokensBTD, typechecked)
+from neat_pi.typing import (ActionBHD, ImageBCHW, LanguageTokensBTD, MaskB,
+                            MaskBL, MaskBT, TimeB, TokenIdsBL,
+                            VisionTokensBTD, typechecked)
 
 
 class MultiModalProjector(nn.Module):
     """pi05 的视觉到语言宽度投影：单层 Linear，无激活函数。"""
 
-    def __init__(self, vision_width: int = 1152,
-                 language_width: int = 2048) -> None:
+    def __init__(self, vision_hidden_dim: int = 1152,
+                 language_hidden_dim: int = 2048) -> None:
         super().__init__()
-        self.linear = nn.Linear(vision_width, language_width, bias=True)
+        self.linear = nn.Linear(vision_hidden_dim, language_hidden_dim, bias=True)
 
     @typechecked
     def forward(self, vision_tokens: VisionTokensBTD) -> LanguageTokensBTD:
@@ -42,7 +42,27 @@ class Pi05(FlowMatchingModel):
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
         self.cfg = cfg
-
+        self.vision_tower = SigLIPVisionEncoder(
+            image_size=cfg.image_size,
+            patch_size=cfg.vision_patch_size,
+            hidden_dim=cfg.vision_hidden_dim,
+            num_layers=cfg.vision_num_layers,
+            num_heads=cfg.vision_num_heads,
+            mlp_hidden_dim=cfg.vision_mlp_hidden_dim,
+        )
+        self.multi_modal_projector = MultiModalProjector(
+            vision_hidden_dim=cfg.vision_hidden_dim,
+            language_hidden_dim=cfg.vlm_hidden_dim,
+        )
+        self.language_model = GemmaLM(
+            vocab_size=cfg.vocab_size,
+            hidden_dim=cfg.vlm_hidden_dim,
+            num_layers=cfg.vlm_num_layers,
+            num_heads=cfg.vlm_num_heads,
+            num_kv_heads=cfg.vlm_num_kv_heads,
+            attn_head_dim=cfg.vlm_attn_head_dim,
+            mlp_hidden_dim=cfg.vlm_mlp_hidden_dim,
+        )
 
     @classmethod
     def from_pretrained(cls, checkpoint_dir: str, cfg: ModelConfig,
@@ -55,8 +75,36 @@ class Pi05(FlowMatchingModel):
         return model.to(device)
 
     @typechecked
+    def embed_prefix(self, images: list[ImageBCHW],
+                     image_masks: list[MaskB], token_ids: TokenIdsBL,
+                     lang_mask: MaskBL) -> tuple[LanguageTokensBTD, MaskBT]:
+        """编码图像与语言并拼成 VLM prefix，返回 (embedding, 有效位 mask)。
+
+        相机 embedding 按 images 的固定顺序沿序列维拼接；图像与语言段都是
+        双向可见的前缀块。image_mask=False 的相机仍保留固定 token 槽位，
+        但其整段视觉 token 在返回的 prefix mask 中置为 False。
+        """
+        embeddings: list[LanguageTokensBTD] = []
+        pad_masks: list[MaskBT] = []
+        if len(images) != len(image_masks):
+            raise ValueError(
+                f"images 数量 {len(images)} 须等于 image_masks 数量 "
+                f"{len(image_masks)}")
+        for image, image_mask in zip(images, image_masks, strict=True):
+            vision_tokens = self.vision_tower(image)
+            projected = self.multi_modal_projector(vision_tokens)
+            embeddings.append(projected)
+            pad_masks.append(image_mask[:, None].expand(-1, projected.shape[1]))
+
+        language_tokens = self.language_model.embed_language_tokens(token_ids)
+        embeddings.append(language_tokens)
+        pad_masks.append(lang_mask)
+        return torch.cat(embeddings, dim=1), torch.cat(pad_masks, dim=1)
+
+    @typechecked
     def predict_velocity(self, images: list[ImageBCHW],
-                         token_ids: TokenIdsBL, lang_mask: MaskBL,
+                         image_masks: list[MaskB], token_ids: TokenIdsBL,
+                         lang_mask: MaskBL,
                          noisy_action: ActionBHD, t: TimeB) -> ActionBHD:
         """训练前向：预测带噪动作的速度场。
 
@@ -67,7 +115,8 @@ class Pi05(FlowMatchingModel):
         raise NotImplementedError("待实现：见各子模块 TODO")
 
     @torch.no_grad()
-    def sample_actions(self, images: list[ImageBCHW], token_ids: TokenIdsBL,
+    def sample_actions(self, images: list[ImageBCHW],
+                       image_masks: list[MaskB], token_ids: TokenIdsBL,
                        lang_mask: MaskBL, num_steps: int = 10) -> ActionBHD:
         """推理：从噪声出发用 Euler 法积分 flow ODE，返回动作 chunk。
 

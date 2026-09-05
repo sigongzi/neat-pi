@@ -17,7 +17,7 @@ def _small_expert(num_layers: int = 2) -> ActionExpert:
     """小而完整的 ActionExpert，用于快速形状/梯度测试。"""
     return ActionExpert(action_dim=7, hidden_dim=64, num_layers=num_layers,
                         num_heads=4, num_kv_heads=1, head_dim=16,
-                        mlp_hidden=128)
+                        mlp_hidden_dim=128)
 
 
 # ---------------- posemb_sincos ----------------
@@ -44,8 +44,8 @@ def test_posemb_sincos_odd_dim_rejected() -> None:
 
 def test_dit_block_output_shape() -> None:
     """自注意力（无 VLM kv）与拼接 VLM kv 两种形态输出形状都不变。"""
-    block = DiTBlock(width=64, num_heads=4, num_kv_heads=1, head_dim=16,
-                     mlp_hidden=128)
+    block = DiTBlock(hidden_dim=64, num_heads=4, num_kv_heads=1, head_dim=16,
+                     mlp_hidden_dim=128)
     x = torch.randn(2, 10, 64)
     cond = torch.randn(2, 64)
     cos, sin = build_rope_cache(10, 16, 10_000.0, x.device, x.dtype)
@@ -67,8 +67,8 @@ def test_dit_block_vlm_kv_matches_naive() -> None:
     残差支路为恒等——正好隔离出注意力支路做精确对拍。
     """
     torch.manual_seed(0)
-    block = DiTBlock(width=64, num_heads=4, num_kv_heads=1, head_dim=16,
-                     mlp_hidden=128)
+    block = DiTBlock(hidden_dim=64, num_heads=4, num_kv_heads=1, head_dim=16,
+                     mlp_hidden_dim=128)
     x = torch.randn(2, 10, 64)
     cond = torch.randn(2, 64)
     prefix_len = 6
@@ -169,8 +169,8 @@ def test_action_expert_forward_with_prefix_cache() -> None:
     from neat_pi.model.gemma import GemmaLM
 
     torch.manual_seed(0)
-    vlm = GemmaLM(vocab_size=64, width=64, num_layers=2, num_heads=4,
-                  num_kv_heads=1, attn_head_dim=16, mlp_hidden=128)
+    vlm = GemmaLM(vocab_size=64, hidden_dim=64, num_layers=2, num_heads=4,
+                  num_kv_heads=1, attn_head_dim=16, mlp_hidden_dim=128)
     expert = _small_expert()
     cache = vlm.prefill(torch.randn(2, 7, 64))
     v = expert(torch.randn(2, 50, 7), torch.rand(2), vlm_kvs=cache)

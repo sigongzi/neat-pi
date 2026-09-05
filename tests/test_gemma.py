@@ -23,8 +23,8 @@ CHECKPOINT = Path("/home/ivoryseagull/neat-pi-old/checkpoints/"
 
 def _small_lm() -> GemmaLM:
     """小而完整的 GemmaLM，用于快速形状/梯度/生成测试。"""
-    return GemmaLM(vocab_size=64, width=64, num_layers=2, num_heads=4,
-                   num_kv_heads=1, attn_head_dim=16, mlp_hidden=128)
+    return GemmaLM(vocab_size=64, hidden_dim=64, num_layers=2, num_heads=4,
+                   num_kv_heads=1, attn_head_dim=16, mlp_hidden_dim=128)
 
 
 def _naive_attention(x: torch.Tensor, attn: GemmaAttention,

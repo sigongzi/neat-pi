@@ -12,8 +12,8 @@ from torch import nn
 
 from neat_pi.config import ModelConfig
 from neat_pi.model.flow_matching import FlowMatchingModel
-from neat_pi.typing import (ActionBHD, ImageBCHW, MaskBL, TimeB, TokenIdsBL,
-                            typechecked)
+from neat_pi.typing import (ActionBHD, ImageBCHW, MaskB, MaskBL, TimeB,
+                            TokenIdsBL, typechecked)
 
 
 class DummyPi05(FlowMatchingModel):
@@ -24,7 +24,8 @@ class DummyPi05(FlowMatchingModel):
         self.head = nn.Linear(cfg.action_dim, cfg.action_dim, bias=True)
 
     @typechecked
-    def predict_velocity(self, images: list[ImageBCHW], token_ids: TokenIdsBL,
+    def predict_velocity(self, images: list[ImageBCHW],
+                         image_masks: list[MaskB], token_ids: TokenIdsBL,
                          lang_mask: MaskBL, noisy_action: ActionBHD,
                          t: TimeB) -> ActionBHD:
         """忽略图像/文本/时间，直接对带噪动作做线性变换返回速度场。"""

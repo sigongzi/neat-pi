@@ -82,11 +82,11 @@ class DiTBlock(nn.Module):
       门控残差；共享 SDPA 由 MoT 跨专家拼接完成（gqa_sdpa）。
     """
 
-    def __init__(self, width: int = 1024, num_heads: int = 8,
+    def __init__(self, hidden_dim: int = 1024, num_heads: int = 8,
                  num_kv_heads: int = 1, head_dim: int = 256,
-                 mlp_hidden: int = 4096, eps: float = 1e-6) -> None:
-        """默认超参对应 pi05 的 gemma_300m 动作专家（width 1024 / 8 头 /
-        1 kv 头 / head_dim 256 / mlp 4096）；时间条件维度等于 width。"""
+                 mlp_hidden_dim: int = 4096, eps: float = 1e-6) -> None:
+        """默认超参对应 pi05 的 gemma_300m 动作专家（hidden_dim 1024 / 8 头 /
+        1 kv 头 / head_dim 256 / mlp 4096）；时间条件维度等于 hidden_dim。"""
         super().__init__()
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -94,10 +94,10 @@ class DiTBlock(nn.Module):
         self.scale = head_dim ** -0.5
         # self_attn 只作 qkv/o 投影的参数容器（与 checkpoint 同名）；
         # 注意力计算统一走 util.gqa_sdpa，不复刻 GemmaAttention.attend。
-        self.self_attn = GemmaAttention(width, num_heads, num_kv_heads, head_dim)
-        self.mlp = MLP(width, mlp_hidden)
-        self.input_layernorm = AdaLayerNorm(width, width, eps)
-        self.post_attention_layernorm = AdaLayerNorm(width, width, eps)
+        self.self_attn = GemmaAttention(hidden_dim, num_heads, num_kv_heads, head_dim)
+        self.mlp = MLP(hidden_dim, mlp_hidden_dim)
+        self.input_layernorm = AdaLayerNorm(hidden_dim, hidden_dim, eps)
+        self.post_attention_layernorm = AdaLayerNorm(hidden_dim, hidden_dim, eps)
 
     @typechecked
     def pre_attn(self, action_tokens: ActionTokensBHD, cos: Tensor,
@@ -192,7 +192,7 @@ class ActionExpert(Expert):
     def __init__(self, action_dim: int = 32, hidden_dim: int = 1024,
                  num_layers: int = 18, num_heads: int = 8,
                  num_kv_heads: int = 1, head_dim: int = 256,
-                 mlp_hidden: int = 4096, theta: float = 10_000.0) -> None:
+                 mlp_hidden_dim: int = 4096, theta: float = 10_000.0) -> None:
         """action_dim 为动作向量维度；其余默认对应 pi05 的 gemma_300m
         动作专家（hidden 1024 / 18 层 / 8 头 / 1 kv 头 / head_dim 256 /
         mlp 4096），theta 为 RoPE 基数（与 VLM 侧一致）。"""
@@ -211,7 +211,7 @@ class ActionExpert(Expert):
         self.time_mlp_out = nn.Linear(hidden_dim, hidden_dim, bias=True)
         # DiTBlock 堆叠与最终 adaRMS norm
         self.layers = nn.ModuleList(
-            DiTBlock(hidden_dim, num_heads, num_kv_heads, head_dim, mlp_hidden)
+            DiTBlock(hidden_dim, num_heads, num_kv_heads, head_dim, mlp_hidden_dim)
             for _ in range(num_layers)
         )
         self.norm = AdaLayerNorm(hidden_dim, hidden_dim)

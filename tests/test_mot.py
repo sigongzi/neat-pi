@@ -22,15 +22,15 @@ from neat_pi.model.mot import MoT
 
 def _small_vlm() -> GemmaLM:
     """小而完整的 VLM 专家（GemmaLM），与动作专家结构参数一致。"""
-    return GemmaLM(vocab_size=64, width=64, num_layers=2, num_heads=4,
-                   num_kv_heads=1, attn_head_dim=16, mlp_hidden=128)
+    return GemmaLM(vocab_size=64, hidden_dim=64, num_layers=2, num_heads=4,
+                   num_kv_heads=1, attn_head_dim=16, mlp_hidden_dim=128)
 
 
 def _small_expert() -> ActionExpert:
     """小而完整的动作专家，head 结构与 _small_vlm 对齐。"""
     return ActionExpert(action_dim=7, hidden_dim=64, num_layers=2,
                         num_heads=4, num_kv_heads=1, head_dim=16,
-                        mlp_hidden=128)
+                        mlp_hidden_dim=128)
 
 
 def _pi05_mask(prefix_len: int, action_len: int) -> torch.Tensor:

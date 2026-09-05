@@ -22,6 +22,10 @@ torchtyping.patch_typeguard()
 # 原始图像批次：[batch, channels, height, width]
 ImageBCHW = TensorType["batch", "channels", "height", "width"]
 
+# 相机可用性 mask：[batch]，True 表示该相机图像有效。缺失相机保留固定
+# token 槽位时，其所有视觉 token 的 prefix mask 由此 mask 展开为 False。
+MaskB = TensorType["batch", torch.bool]
+
 # 通用 3D token 序列：[batch, num_tokens, dim]
 # 只用于跨专家共享的积木（RMSNorm / MLP / AdaLayerNorm 等，VLM、动作专家、
 # SigLIP 都会用）；语义确定的场景用下面的 VisionTokens / LanguageTokens。
@@ -50,6 +54,10 @@ TokenIdsBL = TensorType["batch", "seq_len", torch.long]
 
 # 文本 padding mask：[batch, seq_len]，True 表示有效 token
 MaskBL = TensorType["batch", "seq_len", torch.bool]
+
+# VLM prefix 的 padding mask：[batch, prefix_len]，图像 + 语言 token 拼接后
+# 的序列长度与任一输入的 seq_len 都不同，须使用独立维度名。
+MaskBT = TensorType["batch", "prefix_len", torch.bool]
 
 # 动作 chunk 的时间步 padding mask：[batch, action_horizon]，True 表示有效步
 MaskBH = TensorType["batch", "action_horizon", torch.bool]

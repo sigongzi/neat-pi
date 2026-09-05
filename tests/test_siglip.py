@@ -21,8 +21,8 @@ CHECKPOINT = Path("/home/ivoryseagull/neat-pi-old/checkpoints/"
 
 def _small_encoder() -> SigLIPVisionEncoder:
     """小而完整的塔配置，用于快速形状/梯度测试。"""
-    return SigLIPVisionEncoder(image_size=32, patch_size=8, width=64,
-                               num_layers=2, num_heads=4, mlp_hidden=128)
+    return SigLIPVisionEncoder(image_size=32, patch_size=8, hidden_dim=64,
+                               num_layers=2, num_heads=4, mlp_hidden_dim=128)
 
 
 # ---------------- SiglipMLP ----------------

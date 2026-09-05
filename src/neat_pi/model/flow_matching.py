@@ -12,8 +12,8 @@ import torch
 from torch import nn
 
 from neat_pi.device.backend import DeviceContext, autocast
-from neat_pi.typing import (ActionBHD, ImageBCHW, MaskBH, MaskBL, ScalarLoss,
-                            TimeB, TokenIdsBL, typechecked)
+from neat_pi.typing import (ActionBHD, ImageBCHW, MaskB, MaskBH, MaskBL,
+                            ScalarLoss, TimeB, TokenIdsBL, typechecked)
 
 
 class FlowMatchingModel(nn.Module):
@@ -30,15 +30,17 @@ class FlowMatchingModel(nn.Module):
         self.amp_dtype: torch.dtype = torch.float32
 
     @typechecked
-    def predict_velocity(self, images: list[ImageBCHW], token_ids: TokenIdsBL,
+    def predict_velocity(self, images: list[ImageBCHW],
+                         image_masks: list[MaskB], token_ids: TokenIdsBL,
                          lang_mask: MaskBL, noisy_action: ActionBHD,
                          t: TimeB) -> ActionBHD:
         """预测带噪动作的速度场（由子类实现）。"""
         raise NotImplementedError
 
     @typechecked
-    def forward(self, images: list[ImageBCHW], token_ids: TokenIdsBL,
-                lang_mask: MaskBL, actions: ActionBHD, is_pad: MaskBH,
+    def forward(self, images: list[ImageBCHW], image_masks: list[MaskB],
+                token_ids: TokenIdsBL, lang_mask: MaskBL, actions: ActionBHD,
+                is_pad: MaskBH,
                 real_action_dim: int) -> ScalarLoss:
         """采样 t 与噪声，预测速度场，返回有效步/维上的 masked MSE 标量损失。
 
@@ -57,8 +59,8 @@ class FlowMatchingModel(nn.Module):
         target = noise - actions
 
         with autocast(self.ctx, self.amp_dtype):
-            pred = self.predict_velocity(images, token_ids, lang_mask,
-                                         noisy_action, t)
+            pred = self.predict_velocity(images, image_masks, token_ids,
+                                         lang_mask, noisy_action, t)
 
         pred = pred.float()
         target = target.float()

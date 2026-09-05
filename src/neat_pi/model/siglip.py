@@ -2,7 +2,7 @@
 
 结构与权重命名对齐 ref/openpi/src/openpi/models_pytorch/
 transformers_replace/models/siglip/modeling_siglip.py，规格取 pi05 官方
-SigLIP-SO400m：width 1152 / 27 层 / 16 头 / patch 14 / MLP 4304。
+SigLIP-SO400m：hidden_dim 1152 / 27 层 / 16 头 / patch 14 / MLP 4304。
 
 checkpoint 中的视觉 tower 只到 post_layernorm（无 pooling head），输出
 256 个 1152 维 token，后续 multi_modal_projector 把 1152 投影到 2048
@@ -70,13 +70,13 @@ class SiglipAttention(nn.Module):
 class SiglipEncoderLayer(nn.Module):
     """单层 SigLIP transformer：pre-norm 自注意力 + pre-norm MLP，残差相加。"""
 
-    def __init__(self, dim: int, num_heads: int, mlp_hidden: int,
+    def __init__(self, dim: int, num_heads: int, mlp_hidden_dim: int,
                  eps: float = 1e-6) -> None:
         super().__init__()
         self.layer_norm1 = LayerNorm(dim, eps)
         self.self_attn = SiglipAttention(dim, num_heads)
         self.layer_norm2 = LayerNorm(dim, eps)
-        self.mlp = SiglipMLP(dim, mlp_hidden)
+        self.mlp = SiglipMLP(dim, mlp_hidden_dim)
 
     @typechecked
     def forward(self, x: VisionTokensBTD) -> VisionTokensBTD:
@@ -88,16 +88,16 @@ class SiglipEncoderLayer(nn.Module):
 class SiglipVisionEmbeddings(nn.Module):
     """视觉塔输入端：patch 卷积嵌入 + learned position embedding。"""
 
-    def __init__(self, image_size: int, patch_size: int, width: int) -> None:
+    def __init__(self, image_size: int, patch_size: int, hidden_dim: int) -> None:
         super().__init__()
         self.image_size = image_size
         self.patch_size = patch_size
-        self.width = width
+        self.hidden_dim = hidden_dim
         self.num_patches = (image_size // patch_size) ** 2
 
-        self.patch_embedding = nn.Conv2d(3, width, kernel_size=patch_size,
+        self.patch_embedding = nn.Conv2d(3, hidden_dim, kernel_size=patch_size,
                                          stride=patch_size)
-        self.position_embedding = nn.Embedding(self.num_patches, width)
+        self.position_embedding = nn.Embedding(self.num_patches, hidden_dim)
         self.register_buffer(
             "position_ids",
             torch.arange(self.num_patches).expand(1, -1),
@@ -106,20 +106,20 @@ class SiglipVisionEmbeddings(nn.Module):
 
     @typechecked
     def forward(self, image: ImageBCHW) -> VisionTokensBTD:
-        """图像批次 -> [batch, num_patches, width]。"""
-        embeds = self.patch_embedding(image)  # [batch, width, grid, grid]
-        embeds = embeds.flatten(2).transpose(1, 2)  # [batch, num_patches, width]
+        """图像批次 -> [batch, num_patches, hidden_dim]。"""
+        embeds = self.patch_embedding(image)  # [batch, hidden_dim, grid, grid]
+        embeds = embeds.flatten(2).transpose(1, 2)  # [batch, num_patches, hidden_dim]
         return embeds + self.position_embedding(self.position_ids)
 
 
 class SiglipEncoder(nn.Module):
     """SigLIP transformer 堆叠：N 个 SiglipEncoderLayer。"""
 
-    def __init__(self, width: int, num_layers: int, num_heads: int,
-                 mlp_hidden: int, eps: float = 1e-6) -> None:
+    def __init__(self, hidden_dim: int, num_layers: int, num_heads: int,
+                 mlp_hidden_dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.layers = nn.ModuleList(
-            SiglipEncoderLayer(width, num_heads, mlp_hidden, eps)
+            SiglipEncoderLayer(hidden_dim, num_heads, mlp_hidden_dim, eps)
             for _ in range(num_layers)
         )
 
@@ -133,7 +133,7 @@ class SiglipEncoder(nn.Module):
 class SigLIPVisionEncoder(nn.Module):
     """SigLIP 视觉塔：embeddings -> 27 层 encoder -> post layernorm。
 
-    输出 [batch, (image_size/patch_size)^2, width] 的视觉 token 序列，
+    输出 [batch, (image_size/patch_size)^2, hidden_dim] 的视觉 token 序列，
     不含 pooling head 与 multi_modal_projector（对照 checkpoint）。
 
     子模块层级刻意与 checkpoint 的 `vision_tower.vision_model.*` 相对路径
@@ -142,22 +142,22 @@ class SigLIPVisionEncoder(nn.Module):
     """
 
     def __init__(self, image_size: int = 224, patch_size: int = 14,
-                 width: int = 1152, num_layers: int = 27,
-                 num_heads: int = 16, mlp_hidden: int = 4304,
+                 hidden_dim: int = 1152, num_layers: int = 27,
+                 num_heads: int = 16, mlp_hidden_dim: int = 4304,
                  eps: float = 1e-6) -> None:
         super().__init__()
         self.image_size = image_size
         self.patch_size = patch_size
-        self.width = width
+        self.hidden_dim = hidden_dim
 
-        self.embeddings = SiglipVisionEmbeddings(image_size, patch_size, width)
-        self.encoder = SiglipEncoder(width, num_layers, num_heads, mlp_hidden,
+        self.embeddings = SiglipVisionEmbeddings(image_size, patch_size, hidden_dim)
+        self.encoder = SiglipEncoder(hidden_dim, num_layers, num_heads, mlp_hidden_dim,
                                      eps)
-        self.post_layernorm = LayerNorm(width, eps)
+        self.post_layernorm = LayerNorm(hidden_dim, eps)
 
     @typechecked
     def forward(self, image: ImageBCHW) -> VisionTokensBTD:
-        """图像批次 -> [batch, num_patches, width] 的视觉 token 序列。"""
+        """图像批次 -> [batch, num_patches, hidden_dim] 的视觉 token 序列。"""
         hidden = self.embeddings(image)
         hidden = self.encoder(hidden)
         return self.post_layernorm(hidden)

@@ -30,6 +30,18 @@ class ModelConfig:
     num_cameras: int = 2      # 相机路数（LIBERO: agentview + wrist）
     action_horizon: int = 50  # 一次预测的动作步数
     action_dim: int = 32      # 动作维度（不足处 padding）
+    vision_hidden_dim: int = 1152
+    vision_patch_size: int = 14
+    vision_num_layers: int = 27
+    vision_num_heads: int = 16
+    vision_mlp_hidden_dim: int = 4304
+    vocab_size: int = 257_152
+    vlm_hidden_dim: int = 2048
+    vlm_num_layers: int = 18
+    vlm_num_heads: int = 8
+    vlm_num_kv_heads: int = 1
+    vlm_attn_head_dim: int = 256
+    vlm_mlp_hidden_dim: int = 16384
 
 
 @dataclass
