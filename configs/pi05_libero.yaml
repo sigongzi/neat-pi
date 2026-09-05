@@ -11,7 +11,6 @@ model:
   num_cameras: 2        # LIBERO 常用 agentview + wrist 两路
   action_horizon: 32    # SE(3) delta 动作的 chunk 长度（动作表示见 se3.py，与 pi05 默认 50 不同）
   action_dim: 32        # pi05 动作专家的动作维度上限（含 padding）
-  state_dim: 32
 
 data:
   repo_id: libero       # 仅作标识；实际从本地路径加载

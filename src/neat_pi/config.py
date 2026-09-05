@@ -30,7 +30,6 @@ class ModelConfig:
     num_cameras: int = 2      # 相机路数（LIBERO: agentview + wrist）
     action_horizon: int = 50  # 一次预测的动作步数
     action_dim: int = 32      # 动作维度（不足处 padding）
-    state_dim: int = 32       # 机器人状态维度
 
 
 @dataclass

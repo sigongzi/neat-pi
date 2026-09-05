@@ -75,9 +75,6 @@ AttentionMaskBHLS = TensorType["batch", "num_heads", "seq", "kv_len"]
 # 标量损失（0 维张量）
 ScalarLoss = TensorType[()]
 
-# 机器人状态向量：[batch, state_dim]
-StateBD = TensorType["batch", "state_dim"]
-
 # 时间步向量：[batch, action_hidden_dim]
 TimeBD = TensorType["batch", "action_hidden_dim"]
 

@@ -18,7 +18,7 @@ from neat_pi.model.action_expert import ActionExpert
 from neat_pi.model.flow_matching import FlowMatchingModel
 from neat_pi.model.modules import RMSNorm
 from neat_pi.model.siglip import SigLIPVisionEncoder
-from neat_pi.typing import (ActionBHD, ImageBCHW, LanguageTokensBTD, StateBD,
+from neat_pi.typing import (ActionBHD, ImageBCHW, LanguageTokensBTD, MaskBL,
                             TimeB, TokenIdsBL, VisionTokensBTD, typechecked)
 
 
@@ -56,7 +56,7 @@ class Pi05(FlowMatchingModel):
 
     @typechecked
     def predict_velocity(self, images: list[ImageBCHW],
-                         token_ids: TokenIdsBL, state: StateBD,
+                         token_ids: TokenIdsBL, lang_mask: MaskBL,
                          noisy_action: ActionBHD, t: TimeB) -> ActionBHD:
         """训练前向：预测带噪动作的速度场。
 
@@ -68,7 +68,7 @@ class Pi05(FlowMatchingModel):
 
     @torch.no_grad()
     def sample_actions(self, images: list[ImageBCHW], token_ids: TokenIdsBL,
-                       state: StateBD, num_steps: int = 10) -> ActionBHD:
+                       lang_mask: MaskBL, num_steps: int = 10) -> ActionBHD:
         """推理：从噪声出发用 Euler 法积分 flow ODE，返回动作 chunk。
 
         TODO: 按 pi05 推理路径实现（x_1 ~ N(0,I) 置于 t=1 纯噪声端，

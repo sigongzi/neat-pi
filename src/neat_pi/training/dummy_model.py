@@ -12,7 +12,7 @@ from torch import nn
 
 from neat_pi.config import ModelConfig
 from neat_pi.model.flow_matching import FlowMatchingModel
-from neat_pi.typing import (ActionBHD, ImageBCHW, StateBD, TimeB, TokenIdsBL,
+from neat_pi.typing import (ActionBHD, ImageBCHW, MaskBL, TimeB, TokenIdsBL,
                             typechecked)
 
 
@@ -25,7 +25,7 @@ class DummyPi05(FlowMatchingModel):
 
     @typechecked
     def predict_velocity(self, images: list[ImageBCHW], token_ids: TokenIdsBL,
-                         state: StateBD, noisy_action: ActionBHD,
+                         lang_mask: MaskBL, noisy_action: ActionBHD,
                          t: TimeB) -> ActionBHD:
-        """忽略图像/文本/状态/时间，直接对带噪动作做线性变换返回速度场。"""
+        """忽略图像/文本/时间，直接对带噪动作做线性变换返回速度场。"""
         return self.head(noisy_action)
