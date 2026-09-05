@@ -42,14 +42,19 @@ class FlowMatchingModel(nn.Module):
                 real_action_dim: int) -> ScalarLoss:
         """采样 t 与噪声，预测速度场，返回有效步/维上的 masked MSE 标量损失。
 
+        时间约定对齐 ref/openpi：t=1 纯噪声、t=0 数据，x_t = t*noise +
+        (1-t)*data，目标速度 u_t = noise - data；推理时从 t=1（x = 噪声）
+        以负步长积分回 t=0（见 Pi05.sample_actions，方向须与本处一致）。
         padding 的时间步（episode 末尾）与补零的动作维不参与损失。
         """
         b = actions.shape[0]
         t = torch.rand(b, device=actions.device, dtype=torch.float32)
         noise = torch.randn_like(actions)
+        # 时间约定对齐 ref/openpi：t=1 纯噪声、t=0 数据，x_t = t*noise + (1-t)*data，
+        # 目标速度 u_t = noise - data；采样时从 t=1（x = 噪声）积分回 t=0
         t_ = t.view(b, 1, 1)
-        noisy_action = (1 - t_) * noise + t_ * actions
-        target = actions - noise
+        noisy_action = t_ * noise + (1 - t_) * actions
+        target = noise - actions
 
         with autocast(self.ctx, self.amp_dtype):
             pred = self.predict_velocity(images, token_ids, state, noisy_action, t)

@@ -1,7 +1,8 @@
 """动作专家（pi05 的 flow-matching action expert）。
 
 pi05 的动作生成用 flow matching：给定带噪动作 x_t 与连续时间 t ∈ [0,1]，
-动作专家预测速度场 v(x_t, t)，训练目标是与 (x_1 - x_0) 的 MSE。
+动作专家预测速度场 v(x_t, t)，训练目标是与 u_t = noise - data 的 MSE
+（时间约定 t=1 纯噪声、t=0 数据，对齐 ref/openpi，见 flow_matching.py）。
 
 pi05 与 pi0 的差异（对齐 ref/openpi pi0.py 的 pi05 分支）：
 - 不再有 state token（state_proj 已废弃，状态经离散化拼进文本 prompt）；

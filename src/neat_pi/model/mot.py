@@ -68,7 +68,10 @@ from neat_pi.typing import (ActionTokensBHD, CondBD, LanguageTokensBTD)
 class MoT(nn.Module):
     """把多个 Expert 组合进共享注意力前向的容器（不新建参数）。"""
 
-    def __init__(self, mixtures: dict[str, Expert]) -> None:
+    def __init__(
+        self,
+        mixtures: dict[str, Expert]
+    ) -> None:
         super().__init__()
         Expert.assert_compatible(mixtures)
         self.mixtures = nn.ModuleDict(mixtures)
@@ -167,7 +170,9 @@ class MoT(nn.Module):
                 start = end
         return tokens
 
-    def extra_repr(self) -> str:
+    def extra_repr(
+        self
+    ) -> str:
         lines = []
         for name, module in self.mixtures.items():
             mod_str = repr(module).replace('\n', '\n  ')

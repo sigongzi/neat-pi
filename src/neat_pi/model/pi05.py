@@ -11,14 +11,29 @@
 from __future__ import annotations
 
 import torch
+from torch import nn
 
 from neat_pi.config import ModelConfig
 from neat_pi.model.action_expert import ActionExpert
 from neat_pi.model.flow_matching import FlowMatchingModel
 from neat_pi.model.modules import RMSNorm
 from neat_pi.model.siglip import SigLIPVisionEncoder
-from neat_pi.typing import (ActionBHD, ImageBCHW, StateBD, TimeB, TokenIdsBL,
-                            typechecked)
+from neat_pi.typing import (ActionBHD, ImageBCHW, LanguageTokensBTD, StateBD,
+                            TimeB, TokenIdsBL, VisionTokensBTD, typechecked)
+
+
+class MultiModalProjector(nn.Module):
+    """pi05 的视觉到语言宽度投影：单层 Linear，无激活函数。"""
+
+    def __init__(self, vision_width: int = 1152,
+                 language_width: int = 2048) -> None:
+        super().__init__()
+        self.linear = nn.Linear(vision_width, language_width, bias=True)
+
+    @typechecked
+    def forward(self, vision_tokens: VisionTokensBTD) -> LanguageTokensBTD:
+        """投影 SigLIP token，得到可与语言 embedding 拼接的 VLM token。"""
+        return self.linear(vision_tokens)
 
 
 class Pi05(FlowMatchingModel):
@@ -27,7 +42,7 @@ class Pi05(FlowMatchingModel):
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
         self.cfg = cfg
- 
+
 
     @classmethod
     def from_pretrained(cls, checkpoint_dir: str, cfg: ModelConfig,
@@ -56,6 +71,7 @@ class Pi05(FlowMatchingModel):
                        state: StateBD, num_steps: int = 10) -> ActionBHD:
         """推理：从噪声出发用 Euler 法积分 flow ODE，返回动作 chunk。
 
-        TODO: 按 pi05 推理路径实现（x_0 ~ N(0,I)，t 从 0 到 1 积分）。
+        TODO: 按 pi05 推理路径实现（x_1 ~ N(0,I) 置于 t=1 纯噪声端，
+        t 从 1 到 0 以 dt = -1/num_steps 积分，约定见 flow_matching.py）。
         """
         raise NotImplementedError("待实现：flow matching 采样")

@@ -37,7 +37,7 @@ from neat_pi.model.expert import Expert
 from neat_pi.model.modules import MLP, RMSNorm
 from neat_pi.model.util import apply_rotary_pos_emb, build_rope_cache, gqa_sdpa
 from neat_pi.typing import (AttentionMaskBHLS, CondBD, GateB1D, LogitsBSV,
-                            LanguageTokensBTD, typechecked)
+                            LanguageTokensBTD, TokenIdsBL, typechecked)
 
 
 class GemmaAttention(nn.Module):
@@ -222,6 +222,11 @@ class GemmaLM(Expert):
         )
         self.norm = RMSNorm(width, eps)
         self.lm_head = nn.Linear(width, vocab_size, bias=False)
+
+    @typechecked
+    def embed_language_tokens(self, token_ids: TokenIdsBL) -> LanguageTokensBTD:
+        """查 tied token embedding 并乘 sqrt(width)，得到语言输入 embedding。"""
+        return self.lm_head.weight[token_ids] * self.width ** 0.5
 
     @typechecked
     def forward(self, x: LanguageTokensBTD) -> LogitsBSV:
