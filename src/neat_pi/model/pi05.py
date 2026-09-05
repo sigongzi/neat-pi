@@ -17,10 +17,11 @@ from neat_pi.config import ModelConfig
 from neat_pi.model.action_expert import ActionExpert
 from neat_pi.model.flow_matching import FlowMatchingModel
 from neat_pi.model.gemma import GemmaLM
+from neat_pi.model.mot import MoT
 from neat_pi.model.siglip import SigLIPVisionEncoder
-from neat_pi.typing import (ActionBHD, ActionTokensBHD, CondBD, ImageBCHW,
-                            LanguageTokensBTD, MaskB, MaskBL, MaskBT, TimeB,
-                            TokenIdsBL,
+from neat_pi.typing import (ActionBHD, ActionTokensBHD, AttentionMaskBHLS,
+                            CondBD, ImageBCHW, LanguageTokensBTD, MaskB,
+                            MaskBL, MaskBT, TimeB, TokenIdsBL,
                             VisionTokensBTD, typechecked)
 
 
@@ -118,6 +119,67 @@ class Pi05(FlowMatchingModel):
         """编码带噪动作与 flow 时间，返回动作 token 和 adaRMS 条件向量。"""
         return self.action_expert.encode_tokens(noisy_action, t)
 
+    @staticmethod
+    @typechecked
+    def _joint_attention_mask(prefix_pad_mask: MaskBT,
+                              action_horizon: int) -> AttentionMaskBHLS:
+        """构造 canonical joint mask；prefill 和去噪 mask 由此切片。
+
+        prefix 段双向可见；action 段可见 prefix 和整个动作 chunk。SDPA 只需
+        屏蔽无效 key；无效 query 行可继续 attend 有效 prefix，从而避免
+        all-masked row 产生 NaN，其输出本来也不会被读取。
+        """
+        prefix_len = prefix_pad_mask.shape[1]
+        if prefix_len == 0 or not prefix_pad_mask.any():
+            raise ValueError("prefix_pad_mask 必须包含至少一个有效 token")
+
+        suffix_pad_mask = torch.ones(
+            prefix_pad_mask.shape[0], action_horizon,
+            dtype=torch.bool, device=prefix_pad_mask.device)
+        # prefix_pad_mask: [B, P]
+        # suffix_pad_mask: [B, H]
+        key_pad_mask = torch.cat([prefix_pad_mask, suffix_pad_mask], dim=1)
+        # key_pad_mask:             [B, S]，其中 S = P + H
+        # key_pad_mask[:, None, :]: [B, 1, S_key]
+
+        ar_mask = torch.zeros_like(key_pad_mask)
+        ar_mask[:, prefix_len] = True
+        # ar_mask:  [B, S]
+        ar_cumsum = torch.cumsum(ar_mask, dim=1, dtype=torch.long)
+        # ar_cumsum: [B, S]
+
+        # openpi 的块可见性语义：cumsum(key) <= cumsum(query)。prefix 内为
+        # 双向块；action 首个 token 开启新块，整个动作 chunk 对 action query
+        # 可见。这里只屏蔽无效 key；无效 query 行仍可 attend 有效 prefix，
+        # 避免 all-masked row 的 NaN 进入后续 K/V，其输出不会被读取。
+        #
+        # 以 P=3、H=2、key 全部有效为例：
+        #   key_pad   = [T, T, T | T, T]
+        #   ar_mask   = [0, 0, 0 | 1, 0]
+        #   ar_cumsum = [0, 0, 0 | 1, 1]
+        #
+        # 行是 query，列是 key；T 表示最终可见：
+        #            key 0  1  2  3  4
+        #   query 0:      T  T  T  F  F
+        #   query 1:      T  T  T  F  F
+        #   query 2:      T  T  T  F  F
+        #   query 3:      T  T  T  T  T
+        #   query 4:      T  T  T  T  T
+        #
+        # 若 key_pad 变成 [T, F, T | T, T]，下面 &= 会把 key=1 这一整列
+        # 清成 F；query=1 虽然自身无效，但仍可看 key=0/2，不会整行全 False。
+        #
+        # ar_cumsum[:, None, :]: [B, 1, S_key]
+        # ar_cumsum[:, :, None]: [B, S_query, 1]
+        # 比较后广播成：          [B, S_query, S_key]
+        # key_pad_mask 广播时：    [B, 1, S_key]
+        # 因此 mask 是 SDPA 约定的 [B, query, key]。
+        mask = (ar_cumsum[:, None, :] <= ar_cumsum[:, :, None])
+        mask &= key_pad_mask[:, None, :]
+        # mask: [B, S_query, S_key]
+        return mask[:, None]
+        # return: [B, 1, S_query, S_key]
+
     @typechecked
     def predict_velocity(self, images: list[ImageBCHW],
                          image_masks: list[MaskB], token_ids: TokenIdsBL,
@@ -125,11 +187,32 @@ class Pi05(FlowMatchingModel):
                          noisy_action: ActionBHD, t: TimeB) -> ActionBHD:
         """训练前向：预测带噪动作的速度场。
 
-        images 为多相机图像在 batch 维拼接后的形态（具体排布待数据管线定）。
-        TODO: 串接 vision -> embedding -> action_expert.encode_tokens ->
-        MoT -> action_expert.decode_velocity，并构造双段 attention mask。
+        先分别编码 prefix 和 suffix，再用 MoT 做共享 attention 的 fused
+        前向；只有 action 段需要最终 adaRMS norm 和速度投影。
         """
-        raise NotImplementedError("待实现：见各子模块 TODO")
+        prefix_embeds, prefix_pad_mask = self.embed_prefix(
+            images, image_masks, token_ids, lang_mask)
+        action_tokens, adarms_cond = self.embed_suffix(noisy_action, t)
+        joint_mask = self._joint_attention_mask(
+            prefix_pad_mask, noisy_action.shape[1])
+
+        mot = MoT({
+            "vlm": self.language_model,
+            "action": self.action_expert,
+        })
+        output = mot({
+            "vlm": prefix_embeds,
+            "action": action_tokens,
+        }, attention_mask=joint_mask, conds={
+            "vlm": None,
+            "action": adarms_cond,
+        })
+
+        # MoT 不做专家级收尾；VLM 输出无 LM loss 不需要 norm，
+        # action 最终 adaRMS 的 gate 无残差可消费，按参考实现丢弃。
+        action_hidden, _ = self.action_expert.norm(
+            output["action"], adarms_cond)
+        return self.action_expert.decode_velocity(action_hidden)
 
     @torch.no_grad()
     def sample_actions(self, images: list[ImageBCHW],

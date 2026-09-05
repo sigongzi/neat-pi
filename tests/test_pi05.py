@@ -129,3 +129,80 @@ def test_embed_suffix_delegates_to_action_expert(
     torch.testing.assert_close(adarms_cond, expected_cond)
     assert suffix.shape == (2, 3, 16)
     assert adarms_cond.shape == (2, 16)
+
+
+def test_joint_attention_mask_has_pi05_block_semantics() -> None:
+    """joint mask 表达 prefix 双向、action 全 chunk、无效 key 屏蔽。"""
+    prefix_pad = torch.tensor(
+        [[True, True, False, True, False],
+         [True, True, True, True, True]], dtype=torch.bool)
+    joint = Pi05._joint_attention_mask(prefix_pad, action_horizon=2)
+
+    assert joint.shape == (2, 1, 7, 7)
+    assert not joint[0, :, :, 2].any()
+    assert joint[1, :, :, 2].all()
+    assert not joint[0, :, :, 4].any()
+    valid_indices = [0, 1, 3], [0, 1, 2, 3, 4]
+    for batch_idx, indices in enumerate(valid_indices):
+        indices_tensor = torch.tensor(indices)
+        assert joint[batch_idx, 0, indices_tensor, indices_tensor].all()
+        assert not joint[batch_idx, 0, indices_tensor, 5:].any()
+        assert joint[batch_idx, 0, 5:, indices_tensor].all()
+        assert joint[batch_idx, 0, 5:, 5:].all()
+
+
+def test_predict_velocity_matches_prefill_cache_path(
+        generator: torch.Generator) -> None:
+    """训练 fused 前向与推理 prefill + cache 单步去噪数值一致。"""
+    model = Pi05(_small_model_config())
+    images = [torch.randn(2, 3, 16, 16, generator=generator),
+              torch.zeros(2, 3, 16, 16)]
+    image_masks = [torch.ones(2, dtype=torch.bool),
+                   torch.zeros(2, dtype=torch.bool)]
+    token_ids = torch.randint(0, 64, (2, 6), generator=generator)
+    lang_mask = torch.tensor([[True] * 4 + [False] * 2,
+                              [True] * 6], dtype=torch.bool)
+    noisy_action = torch.randn(2, 3, 7, generator=generator)
+    t = torch.rand(2, generator=generator)
+    velocity = model.predict_velocity(images, image_masks, token_ids,
+                                      lang_mask, noisy_action, t)
+
+    prefix, prefix_pad = model.embed_prefix(
+        images, image_masks, token_ids, lang_mask)
+    prefix_len = prefix.shape[1]
+    action_tokens, adarms_cond = model.embed_suffix(noisy_action, t)
+    joint = model._joint_attention_mask(prefix_pad, 3)
+    cache = model.language_model.prefill(
+        prefix, joint[:, :, :prefix_len, :prefix_len])
+    action_hidden = model.action_expert.run_layers(
+        action_tokens, adarms_cond, cache, joint[:, :, prefix_len:, :])
+    action_hidden, _ = model.action_expert.norm(action_hidden, adarms_cond)
+    expected = model.action_expert.decode_velocity(action_hidden)
+
+    torch.testing.assert_close(velocity, expected, atol=1e-5, rtol=1e-5)
+    assert velocity.shape == (2, 3, 7)
+    assert torch.isfinite(velocity).all()
+
+
+def test_flow_matching_loss_backward_reaches_all_components(
+        generator: torch.Generator) -> None:
+    """真实 Pi05 在小配置下可计算 loss，并反传到 VLM 和 action 专家。"""
+    model = Pi05(_small_model_config())
+    images = [torch.randn(2, 3, 16, 16, generator=generator) for _ in range(2)]
+    image_masks = [torch.ones(2, dtype=torch.bool) for _ in images]
+    token_ids = torch.randint(0, 64, (2, 6), generator=generator)
+    lang_mask = torch.ones(2, 6, dtype=torch.bool)
+    actions = torch.randn(2, 3, 7, generator=generator)
+    is_pad = torch.tensor([[False, False, True],
+                           [False, True, True]])
+    loss = model(images, image_masks, token_ids, lang_mask, actions,
+                 is_pad, real_action_dim=5)
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert model.vision_tower.embeddings.patch_embedding.weight.grad is not None
+    assert model.multi_modal_projector.linear.weight.grad is not None
+    assert model.language_model.lm_head.weight.grad is not None
+    assert model.action_expert.action_in_proj.weight.grad is not None
+    assert model.action_expert.time_mlp_out.weight.grad is not None
+    assert model.action_expert.layers[0].self_attn.q_proj.weight.grad is not None
