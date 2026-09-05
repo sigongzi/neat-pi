@@ -14,11 +14,13 @@ import torch
 from torch import nn
 
 from neat_pi.config import ModelConfig
+from neat_pi.model.action_expert import ActionExpert
 from neat_pi.model.flow_matching import FlowMatchingModel
 from neat_pi.model.gemma import GemmaLM
 from neat_pi.model.siglip import SigLIPVisionEncoder
-from neat_pi.typing import (ActionBHD, ImageBCHW, LanguageTokensBTD, MaskB,
-                            MaskBL, MaskBT, TimeB, TokenIdsBL,
+from neat_pi.typing import (ActionBHD, ActionTokensBHD, CondBD, ImageBCHW,
+                            LanguageTokensBTD, MaskB, MaskBL, MaskBT, TimeB,
+                            TokenIdsBL,
                             VisionTokensBTD, typechecked)
 
 
@@ -63,6 +65,15 @@ class Pi05(FlowMatchingModel):
             attn_head_dim=cfg.vlm_attn_head_dim,
             mlp_hidden_dim=cfg.vlm_mlp_hidden_dim,
         )
+        self.action_expert = ActionExpert(
+            action_dim=cfg.action_dim,
+            hidden_dim=cfg.expert_hidden_dim,
+            num_layers=cfg.expert_num_layers,
+            num_heads=cfg.expert_num_heads,
+            num_kv_heads=cfg.expert_num_kv_heads,
+            head_dim=cfg.expert_attn_head_dim,
+            mlp_hidden_dim=cfg.expert_mlp_hidden_dim,
+        )
 
     @classmethod
     def from_pretrained(cls, checkpoint_dir: str, cfg: ModelConfig,
@@ -100,6 +111,12 @@ class Pi05(FlowMatchingModel):
         embeddings.append(language_tokens)
         pad_masks.append(lang_mask)
         return torch.cat(embeddings, dim=1), torch.cat(pad_masks, dim=1)
+
+    @typechecked
+    def embed_suffix(self, noisy_action: ActionBHD,
+                     t: TimeB) -> tuple[ActionTokensBHD, CondBD]:
+        """编码带噪动作与 flow 时间，返回动作 token 和 adaRMS 条件向量。"""
+        return self.action_expert.encode_tokens(noisy_action, t)
 
     @typechecked
     def predict_velocity(self, images: list[ImageBCHW],

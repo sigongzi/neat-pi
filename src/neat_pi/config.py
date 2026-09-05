@@ -42,6 +42,12 @@ class ModelConfig:
     vlm_num_kv_heads: int = 1
     vlm_attn_head_dim: int = 256
     vlm_mlp_hidden_dim: int = 16384
+    expert_hidden_dim: int = 1024
+    expert_num_layers: int = 18
+    expert_num_heads: int = 8
+    expert_num_kv_heads: int = 1
+    expert_attn_head_dim: int = 256
+    expert_mlp_hidden_dim: int = 4096
 
 
 @dataclass
