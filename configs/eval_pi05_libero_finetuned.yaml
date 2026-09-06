@@ -25,9 +25,11 @@ cameras:
   real:
     - key: observation.images.image
       source: agentview_image
+      rotate_180: true    # LeRobot 原始渲染与旧 LIBERO 训练帧相差 180°
       mask: true
     - key: observation.images.image2
       source: robot0_eye_in_hand_image
+      rotate_180: true
       mask: true
   empty:
     key: observation.images.empty_camera_0
