@@ -9,6 +9,7 @@ checkpoint 的 policy_preprocessor.json 为蓝本改写，见 docs/plan/01）：
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from lerobot.processor import PolicyProcessorPipeline
@@ -19,20 +20,30 @@ if TYPE_CHECKING:
     from neat_pi.config import Config
 
 
-def load_preprocessor(cfg: Config) -> PolicyProcessorPipeline:
-    """按 cfg.data.preprocessor_path 的 JSON 文件加载预处理管线并返回。
+def load_preprocessor_file(preprocessor_path: str | Path,
+                           ) -> PolicyProcessorPipeline:
+    """从 JSON 文件加载 policy 预处理管线并返回。
 
     先 import `lerobot.policies.pi05.processor_pi05` 触发 pi05 自定义 step
-    的注册，其余步骤（含自写 GemmaTokenizerStep 及带 state_file 的 normalizer
-    统计）全部交给 lerobot 的 `from_pretrained` 自动解析。
+    的注册，其余步骤（含自写 GemmaTokenizerStep 及带 state_file 的
+    normalizer 统计）交给 lerobot 的 `from_pretrained` 自动解析。
     """
-    import lerobot.policies.pi05.processor_pi05  # noqa: F401  注册 pi05 自定义 step
+    import lerobot.policies.pi05.processor_pi05  # noqa: F401  注册 pi05 step
 
+    path = Path(preprocessor_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"preprocessor JSON 不存在: {path}")
+    return PolicyProcessorPipeline.from_pretrained(
+        str(path), config_filename=path.name
+    )
+
+
+def load_preprocessor(cfg: Config) -> PolicyProcessorPipeline:
+    """按 cfg.data.preprocessor_path 的 JSON 文件加载预处理管线并返回。
+    """
     if not cfg.data.preprocessor_path:
         raise ValueError("data.preprocessor_path 未设置：需指向 policy_preprocessor.json")
-    return PolicyProcessorPipeline.from_pretrained(
-        cfg.data.preprocessor_path, config_filename="policy_preprocessor.json"
-    )
+    return load_preprocessor_file(cfg.data.preprocessor_path)
 
 
 def load_postprocessor(cfg: Config) -> PolicyProcessorPipeline:

@@ -45,8 +45,8 @@ tokenizer:
   padding_side: right
 
 normalization:
-  preprocessor_path: configs/eval_pi05_libero_finetuned_preprocessor.json
-  postprocessor_path: configs/eval_pi05_libero_finetuned_postprocessor.json
+  preprocessor_path: eval_pi05_libero_finetuned_preprocessor.json
+  postprocessor_path: eval_pi05_libero_finetuned_postprocessor.json
 
 env:
   suites:

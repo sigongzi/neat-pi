@@ -67,8 +67,8 @@ def test_eval_camera_contract_keeps_empty_camera() -> None:
 def test_eval_processor_pipelines_are_configured_for_local_checkpoint() -> None:
     """MEAN_STD pre/post processor 可离线加载且形状与 7 维 action 一致。"""
     config = _load_yaml(CONFIG_PATH)
-    preprocessor_path = ROOT / config["normalization"]["preprocessor_path"]
-    postprocessor_path = ROOT / config["normalization"]["postprocessor_path"]
+    preprocessor_path = ROOT / "configs" / config["normalization"]["preprocessor_path"]
+    postprocessor_path = ROOT / "configs" / config["normalization"]["postprocessor_path"]
     preprocessor_config = json.loads(preprocessor_path.read_text(encoding="utf-8"))
     postprocessor_config = json.loads(postprocessor_path.read_text(encoding="utf-8"))
     checkpoint_dir = Path(config["checkpoint"]["path"])
