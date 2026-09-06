@@ -1,4 +1,4 @@
-"""pi05 顶层模块测试：先验证 projector 与 tied 语言 embedding 积木。"""
+"""pi05 顶层模块测试：覆盖计划 04 的组装与训练/推理等价性验收。"""
 
 from __future__ import annotations
 
@@ -30,6 +30,27 @@ def _small_model_config() -> ModelConfig:
         expert_num_layers=1, expert_num_heads=4, expert_num_kv_heads=1,
         expert_attn_head_dim=8, expert_mlp_hidden_dim=32,
     )
+
+
+def _reference_make_att_2d_masks(prefix_pad: torch.Tensor,
+                                 action_horizon: int) -> torch.Tensor:
+    """手写 openpi make_att_2d_masks 的 pi05 双段展开，供对拍。
+
+    与 Pi05._joint_attention_mask 相同，这里只屏蔽无效 key；无效 prefix
+    query 行保留对有效 prefix key 的可见性，避免 SDPA 产生 all-masked
+    row。其输出本来不会进入损失或采样结果。
+    """
+    prefix_len = prefix_pad.shape[1]
+    key_pad = torch.cat(
+        [prefix_pad,
+         torch.ones(prefix_pad.shape[0], action_horizon, dtype=torch.bool)],
+        dim=1,
+    )
+    ar_mask = torch.zeros_like(key_pad)
+    ar_mask[:, prefix_len] = True
+    ar_cumsum = torch.cumsum(ar_mask, dim=1)
+    mask = ar_cumsum[:, None, :] <= ar_cumsum[:, :, None]
+    return mask & key_pad[:, None, :]
 
 
 def test_projector_shape(generator: torch.Generator) -> None:
@@ -151,6 +172,34 @@ def test_joint_attention_mask_has_pi05_block_semantics() -> None:
         assert joint[batch_idx, 0, 5:, 5:].all()
 
 
+def test_joint_attention_mask_matches_reference_make_att_2d_masks(
+        generator: torch.Generator) -> None:
+    """canonical mask 必须与手写 make_att_2d_masks 展开逐元素一致。"""
+    model = Pi05(_small_model_config())
+    images = [torch.randn(2, 3, 16, 16, generator=generator),
+              torch.zeros(2, 3, 16, 16)]
+    # 第二路相机在 batch 1 中缺失；语言段在 batch 0 中包含右 padding。
+    image_masks = [torch.ones(2, dtype=torch.bool),
+                   torch.tensor([True, False], dtype=torch.bool)]
+    token_ids = torch.randint(0, 64, (2, 6), generator=generator)
+    lang_mask = torch.tensor([[True] * 4 + [False] * 2,
+                              [True] * 6], dtype=torch.bool)
+    _, prefix_pad = model.embed_prefix(
+        images, image_masks, token_ids, lang_mask)
+
+    expected = _reference_make_att_2d_masks(prefix_pad, action_horizon=3)
+    actual = model._joint_attention_mask(prefix_pad, action_horizon=3)
+    actual_2d = actual[:, 0]
+    torch.testing.assert_close(actual_2d, expected)
+
+    # 检查两个 padding 来源都实际进入 mask：禁用相机的所有视觉槽位不可
+    # 作为 key；语言 padding 的最后两个槽位也不可作为 key。
+    assert actual_2d[0, :, 16:32].all()
+    assert not actual_2d[1, :, 16:32].any()
+    assert not actual_2d[0, :, 36:38].any()
+    assert actual_2d[1, :, 36:38].all()
+
+
 def test_predict_velocity_matches_prefill_cache_path(
         generator: torch.Generator) -> None:
     """训练 fused 前向与推理 prefill + cache 单步去噪数值一致。"""
@@ -253,5 +302,7 @@ def test_flow_matching_loss_backward_reaches_all_components(
     assert model.multi_modal_projector.linear.weight.grad is not None
     assert model.language_model.lm_head.weight.grad is not None
     assert model.action_expert.action_in_proj.weight.grad is not None
+    assert model.action_expert.time_mlp_in.weight.grad is not None
     assert model.action_expert.time_mlp_out.weight.grad is not None
     assert model.action_expert.layers[0].self_attn.q_proj.weight.grad is not None
+    assert model.action_expert.layers[0].mlp.down_proj.weight.grad is not None
