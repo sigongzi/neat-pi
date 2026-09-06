@@ -24,6 +24,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 import json
 import os
+import re
 import struct
 
 import torch
@@ -32,6 +33,14 @@ from torch import Tensor, nn
 
 
 _LOCAL_CHECKPOINT_FORMAT = "neat-pi.pi05-local-v1"
+_FUSED_INTERNAL_RE = re.compile(
+    r"^mot\.layers\.(\d+)\.(vlm|action)\.(.+)$")
+_FUSED_CANONICAL_RE = re.compile(
+    r"^(language_model|action_expert)\.layers\.(\d+)\.(.+)$")
+_FUSED_EXPERT_TO_CANONICAL = {"vlm": "language_model", "action": "action_expert"}
+_FUSED_CANONICAL_TO_EXPERT = {
+    value: key for key, value in _FUSED_EXPERT_TO_CANONICAL.items()
+}
 
 
 @dataclass(frozen=True)
@@ -152,6 +161,34 @@ def translate_name(checkpoint_name: str) -> str | None:
     raise ValueError(f"无法映射的 checkpoint 参数名: {checkpoint_name}")
 
 
+def internal_to_canonical_name(name: str) -> str:
+    """把 Pi05 的 internal fused-layer state_dict 名映射回 canonical 名。"""
+    match = _FUSED_INTERNAL_RE.fullmatch(name)
+    if not match:
+        return name
+    layer_index, expert_name, suffix = match.groups()
+    canonical_expert = _FUSED_EXPERT_TO_CANONICAL[expert_name]
+    return f"{canonical_expert}.layers.{layer_index}.{suffix}"
+
+
+def canonical_to_internal_name(name: str) -> str:
+    """把 canonical Pi05 state_dict 名映射到 internal fused-layer 名。"""
+    match = _FUSED_CANONICAL_RE.fullmatch(name)
+    if not match:
+        return name
+    canonical_expert, layer_index, suffix = match.groups()
+    expert_name = _FUSED_CANONICAL_TO_EXPERT[canonical_expert]
+    return f"mot.layers.{layer_index}.{expert_name}.{suffix}"
+
+
+def canonical_pi05_state_dict(model: nn.Module) -> dict[str, Tensor]:
+    """返回 canonical Pi05 参数名视图；tensor 仍是模型当前存储的同一对象。"""
+    return {
+        internal_to_canonical_name(name): tensor
+        for name, tensor in model.state_dict().items()
+    }
+
+
 def load_pi05_weights(model: nn.Module,
                       checkpoint_dir: str) -> Pi05LoadResult:
     """加载 checkpoint 权重进 model（就地更新），支持原始和本地格式。
@@ -161,8 +198,9 @@ def load_pi05_weights(model: nn.Module,
     形状；未知名字和双向遗漏都直接报错。
     """
     state = model.state_dict()
+    canonical_state = canonical_pi05_state_dict(model)
     local_format = is_local_pi05_checkpoint(checkpoint_dir)
-    expected_names = set(state)
+    expected_names = set(canonical_state)
     loaded_names: set[str] = set()
     skipped_names: set[str] = set()
     checkpoint_count = 0
@@ -174,18 +212,19 @@ def load_pi05_weights(model: nn.Module,
         if local_name is None:
             skipped_names.add(checkpoint_label)
             continue
-        if local_name not in state:
+        internal_name = canonical_to_internal_name(local_name)
+        if internal_name not in state:
             source_label = ("本地名字" if local_format
                             else f"来自 {checkpoint_name}")
             raise KeyError(
                 f"映射后的名字不在模型中: {local_name} ({source_label})")
         if local_name in loaded_names:
             raise ValueError(f"映射后的模型参数被重复写入: {local_name}")
-        if state[local_name].shape != tensor.shape:
+        if state[internal_name].shape != tensor.shape:
             raise ValueError(
-                f"形状不匹配: {local_name} 模型 {tuple(state[local_name].shape)} "
+                f"形状不匹配: {local_name} 模型 {tuple(state[internal_name].shape)} "
                 f"vs checkpoint {tuple(tensor.shape)}")
-        state[local_name].copy_(tensor)
+        state[internal_name].copy_(tensor)
         loaded_names.add(local_name)
 
     if loaded_names != expected_names:

@@ -13,11 +13,13 @@ MoT 的 fused 逐层前向（训练形态）应与分离执行给出相同的数
 from __future__ import annotations
 
 import torch
+import pytest
+from torch import nn
 
 from neat_pi.model.action_expert import ActionExpert
 from neat_pi.model.gemma import GemmaLM
 from neat_pi.model.util import build_rope_cache
-from neat_pi.model.mot import MoT
+from neat_pi.model.mot import MoT, MoTFusedLayer
 
 
 def _small_vlm() -> GemmaLM:
@@ -104,3 +106,31 @@ def test_mot_fused_matches_separate_runs() -> None:
     for i, layer in enumerate(expert.layers):
         x = layer(x, cond, cos_a, sin_a, vlm_kv=cache[i])
     assert torch.allclose(fused["action"], x, atol=1e-5)
+
+
+def test_mot_takes_ownership_using_fused_layers() -> None:
+    """MoT 接管 layers，Expert 只保留只读 view，避免参数双重注册。"""
+    vlm = _small_vlm()
+    expert = _small_expert()
+    mot = MoT({"vlm": vlm, "action": expert})
+
+    assert len(mot.layers) == 2
+    assert all(isinstance(layer, MoTFusedLayer) for layer in mot.layers)
+    assert mot.layers[0].vlm is vlm.layers[0]
+    assert mot.layers[0].action is expert.layers[0]
+    assert not isinstance(vlm.layers, nn.ModuleList)
+    assert not isinstance(expert.layers, nn.ModuleList)
+    assert "layers" not in vlm._modules
+    assert "layers" not in expert._modules
+    with pytest.raises(RuntimeError, match="不拥有 layers"):
+        vlm.take_owned_layers()
+
+
+def test_mot_parameter_paths_are_unique_after_fused_ownership() -> None:
+    """layer 参数只出现在 MoTFusedLayer 路径下。"""
+    mot = MoT({"vlm": _small_vlm(), "action": _small_expert()})
+    names = [name for name, _ in mot.named_parameters()]
+
+    assert len(names) == len(set(names))
+    assert all(name.startswith("layers.") for name in names)
+    assert all(not name.startswith("mixtures.") for name in names)

@@ -23,7 +23,41 @@ num_layers 由基类从 len(layers) 推导，不另存一份，避免双源不�
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, cast
 from torch import nn
+
+if TYPE_CHECKING:
+    from neat_pi.model.mot import MoT
+
+
+class ExpertLayerView:
+    """只读访问 MoTFusedLayer 中属于一个 Expert 的 block 序列。
+
+    FSDP 的所有权必须落在配对后的 fused layer 上；这个 view 让
+    GemmaLM.prefill / ActionExpert.run_layers 等推理路径保持原 API，
+    同时避免 Expert 与 MoT 重复注册同一批参数。
+    """
+
+    __slots__ = ("_stack", "_expert_name")
+
+    def __init__(self, stack: "MoT", expert_name: str) -> None:
+        """绑定 fused-layer 容器与专家名。"""
+        self._stack = stack
+        self._expert_name = expert_name
+
+    def __len__(self) -> int:
+        """返回层数。"""
+        return len(self._stack.layers)
+
+    def __getitem__(self, index: int) -> nn.Module:
+        """按层号返回该 Expert 的 block。"""
+        layer = self._stack.layers[index]
+        return cast(nn.Module, getattr(layer, self._expert_name))
+
+    def __iter__(self) -> Iterator[nn.Module]:
+        """按层序迭代 Expert block。"""
+        return (self[index] for index in range(len(self)))
 
 
 class Expert(nn.Module):
@@ -39,7 +73,53 @@ class Expert(nn.Module):
     attn_head_dim: int
     theta: float
     # 逐层模块堆叠；layers[i] 的命名契约见模块 docstring
-    layers: nn.ModuleList
+    def __init__(self) -> None:
+        """初始化 Expert 基类并清空 layer view。"""
+        super().__init__()
+        self._layer_view: ExpertLayerView | None = None
+
+    @property
+    def layers(self) -> nn.ModuleList | ExpertLayerView:
+        """返回 owned layers 或绑定到 MoTFusedLayer stack 的只读 view。"""
+        if self._layer_view is not None:
+            return self._layer_view
+        layers = self._modules.get("layers")
+        if not isinstance(layers, nn.ModuleList):
+            raise RuntimeError("Expert 尚未注册 owned layers")
+        return layers
+
+    @layers.setter
+    def layers(self, value: nn.ModuleList | ExpertLayerView) -> None:
+        """注册 owned layers，或把 layers 切换到 MoT 的只读 view。"""
+        self._layer_view = value if isinstance(value, ExpertLayerView) else None
+        if isinstance(value, ExpertLayerView):
+            self._modules.pop("layers", None)
+        else:
+            self._modules["layers"] = value
+
+    def bind_layer_view(self, stack: "MoT", expert_name: str) -> None:
+        """把 Expert 的 layer 访问切换到 MoT 配对层上的只读 view。"""
+        if self._layer_view is not None:
+            raise RuntimeError("Expert layer view 已经绑定到 MoT")
+        self._layer_view = ExpertLayerView(stack, expert_name)
+        self._modules.pop("layers", None)
+
+    def take_owned_layers(self) -> nn.ModuleList:
+        """取出 owned layers，供 MoTFusedLayer stack 接管所有权。"""
+        # "owner" 指 nn.Module 的注册所有权：只有注册在哪个父模块下，
+        # state_dict 参数路径、FSDP 分片和 module traversal 才归属哪里。
+        # 这里必须把 layers 从 Expert._modules 移除，再由 MoTFusedLayer 注册；
+        # 否则同一个 block 会同时出现在 language_model/action_expert 与
+        # mot.layers 两条路径下，造成重复参数和 FSDP 所有权歧义。
+        # 移交后 Expert 仍可通过 ExpertLayerView 访问同一批 block，因此
+        # prefill / run_layers 等推理路径保持不变。
+        if self._layer_view is not None:
+            raise RuntimeError("Expert 不拥有 layers，无法再次移交给 MoT")
+        layers = self._modules.get("layers")
+        if not isinstance(layers, nn.ModuleList):
+            raise TypeError("Expert.layers 必须是 nn.ModuleList")
+        self._modules.pop("layers", None)
+        return layers
 
     @property
     def num_layers(self) -> int:

@@ -12,7 +12,10 @@ from safetensors.torch import save_file
 from neat_pi.config import ModelConfig
 from neat_pi.model.pi05 import Pi05
 from neat_pi.model.weights import (convert_pi05_checkpoint,
+                                   canonical_pi05_state_dict,
                                    is_local_pi05_checkpoint,
+                                   internal_to_canonical_name,
+                                   canonical_to_internal_name,
                                    load_pi05_weights, translate_name)
 
 
@@ -61,7 +64,7 @@ def _write_small_checkpoint(model: Pi05, checkpoint_dir: Path) -> None:
     """按当前 checkpoint 标签生成小配置权重文件并附带显式跳过头。"""
     checkpoint: dict[str, torch.Tensor] = {
         _current_checkpoint_name(name): tensor.detach().clone()
-        for name, tensor in model.state_dict().items()
+        for name, tensor in canonical_pi05_state_dict(model).items()
     }
     checkpoint["paligemma_with_expert.gemma_expert.lm_head.weight"] = (
         torch.randn(4, 8))
@@ -97,6 +100,42 @@ def test_translate_name_skips_expert_language_head() -> None:
     assert translate_name(name) is None
 
 
+def test_fused_layer_internal_and_canonical_names_round_trip() -> None:
+    """MoT internal layer 名与 canonical checkpoint 名一一对应。"""
+    internal_names = [
+        "mot.layers.0.vlm.self_attn.q_proj.weight",
+        "mot.layers.0.action.self_attn.q_proj.weight",
+        "mot.layers.17.vlm.mlp.down_proj.weight",
+        "mot.layers.17.action.mlp.down_proj.weight",
+    ]
+    canonical_names = [
+        "language_model.layers.0.self_attn.q_proj.weight",
+        "action_expert.layers.0.self_attn.q_proj.weight",
+        "language_model.layers.17.mlp.down_proj.weight",
+        "action_expert.layers.17.mlp.down_proj.weight",
+    ]
+    for internal, canonical in zip(internal_names, canonical_names, strict=True):
+        assert internal_to_canonical_name(internal) == canonical
+        assert canonical_to_internal_name(canonical) == internal
+
+
+def test_small_pi05_canonical_state_dict_hides_fused_paths() -> None:
+    """Pi05 对外导出的 state dict 仍保持 checkpoint canonical 命名。"""
+    model = Pi05(_small_model_config())
+    internal_names = set(model.state_dict())
+    canonical_state = canonical_pi05_state_dict(model)
+
+    assert internal_to_canonical_name("mot.layers.0.vlm.mlp.down_proj.weight") == \
+        "language_model.layers.0.mlp.down_proj.weight"
+    assert canonical_to_internal_name(
+        "action_expert.layers.0.self_attn.q_proj.weight") == \
+        "mot.layers.0.action.self_attn.q_proj.weight"
+    assert all(not name.startswith("mot.") for name in canonical_state)
+    assert canonical_state.keys() == {
+        internal_to_canonical_name(name) for name in internal_names
+    }
+
+
 def test_from_pretrained_loads_current_labels(tmp_path: Path) -> None:
     """from_pretrained 能直接加载当前标签 checkpoint 且覆盖每个模型参数。"""
     cfg = _small_model_config()
@@ -112,8 +151,10 @@ def test_from_pretrained_loads_current_labels(tmp_path: Path) -> None:
     assert all(parameter.dtype is torch.bfloat16
                for parameter in model.parameters())
     expected_model.to(dtype=torch.bfloat16)
-    for name, expected in expected_model.state_dict().items():
-        actual = model.state_dict()[name]
+    expected_state = canonical_pi05_state_dict(expected_model)
+    actual_state = canonical_pi05_state_dict(model)
+    for name, expected in expected_state.items():
+        actual = actual_state[name]
         torch.testing.assert_close(actual, expected)
 
 
@@ -135,8 +176,10 @@ def test_converted_checkpoint_loads_without_translation(tmp_path: Path) -> None:
 
     model = Pi05.from_pretrained(str(local_dir), cfg=cfg,
                                  device=torch.device("cpu"))
-    for name, expected in expected_model.state_dict().items():
-        torch.testing.assert_close(model.state_dict()[name], expected)
+    expected_state = canonical_pi05_state_dict(expected_model)
+    actual_state = canonical_pi05_state_dict(model)
+    for name, expected in expected_state.items():
+        torch.testing.assert_close(actual_state[name], expected)
 
 
 def test_converted_local_checkpoint_can_be_consolidated(tmp_path: Path) -> None:
@@ -157,8 +200,10 @@ def test_converted_local_checkpoint_can_be_consolidated(tmp_path: Path) -> None:
 
     model = Pi05.from_pretrained(str(single_dir), cfg=cfg,
                                  device=torch.device("cpu"))
-    for name, expected in expected_model.state_dict().items():
-        torch.testing.assert_close(model.state_dict()[name], expected)
+    expected_state = canonical_pi05_state_dict(expected_model)
+    actual_state = canonical_pi05_state_dict(model)
+    for name, expected in expected_state.items():
+        torch.testing.assert_close(actual_state[name], expected)
 
 
 def test_real_base_checkpoint_headers_all_translate() -> None:

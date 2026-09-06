@@ -76,6 +76,10 @@ class Pi05(FlowMatchingModel):
             head_dim=cfg.expert_attn_head_dim,
             mlp_hidden_dim=cfg.expert_mlp_hidden_dim,
         )
+        self.mot = MoT({
+            "vlm": self.language_model,
+            "action": self.action_expert,
+        })
 
     @classmethod
     def from_pretrained(cls, checkpoint_dir: str,
@@ -213,11 +217,7 @@ class Pi05(FlowMatchingModel):
         joint_mask = self._joint_attention_mask(
             prefix_pad_mask, noisy_action.shape[1])
 
-        mot = MoT({
-            "vlm": self.language_model,
-            "action": self.action_expert,
-        })
-        output = mot({
+        output = self.mot({
             "vlm": prefix_embeds,
             "action": action_tokens,
         }, attention_mask=joint_mask, conds={
