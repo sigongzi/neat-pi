@@ -45,6 +45,15 @@ class Pi05ConversionResult:
 
 
 @dataclass(frozen=True)
+class Pi05LoadResult:
+    """一次权重加载的统计结果。"""
+
+    checkpoint_dir: Path
+    loaded_count: int
+    skipped_count: int
+
+
+@dataclass(frozen=True)
 class _TensorSpec:
     """单个输出张量的 safetensors header 信息。"""
 
@@ -143,7 +152,8 @@ def translate_name(checkpoint_name: str) -> str | None:
     raise ValueError(f"无法映射的 checkpoint 参数名: {checkpoint_name}")
 
 
-def load_pi05_weights(model: nn.Module, checkpoint_dir: str) -> None:
+def load_pi05_weights(model: nn.Module,
+                      checkpoint_dir: str) -> Pi05LoadResult:
     """加载 checkpoint 权重进 model（就地更新），支持原始和本地格式。
 
     原始 checkpoint 先用 translate_name 转换名字；NeatPi 本地格式的名字
@@ -158,10 +168,11 @@ def load_pi05_weights(model: nn.Module, checkpoint_dir: str) -> None:
     checkpoint_count = 0
     for checkpoint_name, tensor in iter_checkpoint_tensors(checkpoint_dir):
         checkpoint_count += 1
+        checkpoint_label = checkpoint_name.removeprefix("model.")
         local_name = (checkpoint_name if local_format
                       else translate_name(checkpoint_name))
         if local_name is None:
-            skipped_names.add(checkpoint_name)
+            skipped_names.add(checkpoint_label)
             continue
         if local_name not in state:
             source_label = ("本地名字" if local_format
@@ -191,6 +202,11 @@ def load_pi05_weights(model: nn.Module, checkpoint_dir: str) -> None:
         raise RuntimeError(
             "显式跳过集不是预期的 action-expert 文本头，"
             f"实际: {sorted(skipped_names)}")
+    return Pi05LoadResult(
+        checkpoint_dir=Path(checkpoint_dir),
+        loaded_count=len(loaded_names),
+        skipped_count=len(skipped_names),
+    )
 
 
 def convert_pi05_checkpoint(source_dir: str, output_dir: str,

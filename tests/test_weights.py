@@ -12,7 +12,8 @@ from safetensors.torch import save_file
 from neat_pi.config import ModelConfig
 from neat_pi.model.pi05 import Pi05
 from neat_pi.model.weights import (convert_pi05_checkpoint,
-                                   is_local_pi05_checkpoint, translate_name)
+                                   is_local_pi05_checkpoint,
+                                   load_pi05_weights, translate_name)
 
 
 def _small_model_config() -> ModelConfig:
@@ -103,7 +104,14 @@ def test_from_pretrained_loads_current_labels(tmp_path: Path) -> None:
     _write_small_checkpoint(expected_model, tmp_path)
 
     model = Pi05.from_pretrained(str(tmp_path), cfg=cfg,
-                                 device=torch.device("cpu"))
+                                 device=torch.device("cpu"),
+                                 dtype=torch.bfloat16)
+    load_result = load_pi05_weights(expected_model, str(tmp_path))
+    assert load_result.loaded_count == 55
+    assert load_result.skipped_count == 1
+    assert all(parameter.dtype is torch.bfloat16
+               for parameter in model.parameters())
+    expected_model.to(dtype=torch.bfloat16)
     for name, expected in expected_model.state_dict().items():
         actual = model.state_dict()[name]
         torch.testing.assert_close(actual, expected)

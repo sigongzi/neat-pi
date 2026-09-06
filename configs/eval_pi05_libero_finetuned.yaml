@@ -1,0 +1,62 @@
+# pi05 LIBERO 评测合同：以旧 checkpoint 的训练/推理配置为准。
+# 当前 SE(3) 训练配置不得混入本文件；后续 eval 脚本只从这里读取评测超参。
+
+checkpoint:
+  path: /home/ivoryseagull/neat-pi-old/checkpoints/pi05_libero_finetuned
+  tokenizer_path: /home/ivoryseagull/neat-pi-old/checkpoints/pi05_libero_finetuned/tokenizer.json
+
+device:
+  type: cuda
+  dtype: bfloat16
+
+model:
+  image_size: 224
+  num_cameras: 3        # image + image2 + 1 路 empty camera
+  max_state_dim: 32
+  max_action_dim: 32
+  action_horizon: 50
+
+actions:
+  raw_dim: 7
+  flow_steps: 10
+  normalization: MEAN_STD
+
+cameras:
+  real:
+    - key: observation.images.image
+      source: agentview_image
+      mask: true
+    - key: observation.images.image2
+      source: robot0_eye_in_hand_image
+      mask: true
+  empty:
+    key: observation.images.empty_camera_0
+    fill_value: -1.0
+    mask: false
+
+state:
+  raw_dim: 8
+  normalization: MEAN_STD
+
+tokenizer:
+  max_length: 200
+  padding_side: right
+
+normalization:
+  preprocessor_path: configs/eval_pi05_libero_finetuned_preprocessor.json
+  postprocessor_path: configs/eval_pi05_libero_finetuned_postprocessor.json
+
+env:
+  suites:
+    - libero_spatial
+  task_ids: null        # null 表示选中 suite 的全部 task
+  episodes_per_task: 3
+  use_init_states: true
+  observation_size: [256, 256]
+  control_mode: relative
+  success_key: is_success
+  clip_bounds: [-1.0, 1.0]  # LeRobot LIBERO 定义 ACTION_LOW=-1, ACTION_HIGH=1
+
+output:
+  jsonl_path: outputs/eval_libero/episodes.jsonl
+  summary_path: outputs/eval_libero/summary.json
