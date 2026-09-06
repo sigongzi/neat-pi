@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,49 @@ class FSDPConfig:
 
     sharding_strategy: str = "full_shard"
     use_orig_params: bool = True
+    sync_module_states: bool = True
+    limit_all_gathers: bool = True
+    forward_prefetch: bool = False
+    backward_prefetch: str = "backward_pre"
+    activation_checkpointing: bool = True
+    state_dict_type: str = "full"
+    cpu_offload: bool = False
+
+    def validate(self) -> None:
+        """校验 FSDP 配置取值，尽早暴露 YAML 或调用侧错误。"""
+        sharding_strategies = {"full_shard", "shard_grad_op", "no_shard"}
+        if self.sharding_strategy not in sharding_strategies:
+            raise ValueError(
+                f"fsdp.sharding_strategy 必须是 {sorted(sharding_strategies)}，"
+                f"实际为 {self.sharding_strategy!r}")
+        backward_prefetch_modes = {"backward_pre", "backward_post", "none"}
+        if self.backward_prefetch not in backward_prefetch_modes:
+            raise ValueError(
+                "fsdp.backward_prefetch 必须是 "
+                f"{sorted(backward_prefetch_modes)}，实际为 {self.backward_prefetch!r}")
+        if self.state_dict_type != "full":
+            raise ValueError(
+                "fsdp.state_dict_type 第一阶段只支持 'full'，"
+                f"实际为 {self.state_dict_type!r}")
+        boolean_fields = {
+            "use_orig_params": self.use_orig_params,
+            "sync_module_states": self.sync_module_states,
+            "limit_all_gathers": self.limit_all_gathers,
+            "forward_prefetch": self.forward_prefetch,
+            "activation_checkpointing": self.activation_checkpointing,
+            "cpu_offload": self.cpu_offload,
+        }
+        for name, value in boolean_fields.items():
+            if type(value) is not bool:
+                raise ValueError(f"fsdp.{name} 必须是布尔值，实际为 {value!r}")
+        if self.forward_prefetch and self.activation_checkpointing:
+            raise ValueError(
+                "fsdp.forward_prefetch 与 activation_checkpointing 暂不支持同时启用；"
+                "请显式选择其中一种性能策略")
+
+    def __post_init__(self) -> None:
+        """构造时执行一次配置校验。"""
+        self.validate()
 
 
 @dataclass
@@ -84,7 +128,47 @@ class TrainingConfig:
     log_every: int = 10
     save_every: int = 1000
     output_dir: str = "outputs/pi05_libero"
+    gradient_clip_norm: float | None = 1.0
+    grad_accum_steps: int = 1
+    resume: bool = False
     fsdp: FSDPConfig = field(default_factory=FSDPConfig)
+
+    def validate(self) -> None:
+        """校验训练超参数及其与 FSDP 配置的组合。"""
+        if type(self.max_steps) is not int or self.max_steps <= 0:
+            raise ValueError(f"training.max_steps 必须是正整数，实际为 {self.max_steps!r}")
+        if type(self.grad_accum_steps) is not int or self.grad_accum_steps <= 0:
+            raise ValueError(
+                f"training.grad_accum_steps 必须是正整数，实际为 {self.grad_accum_steps!r}")
+        for name, value in (("log_every", self.log_every),
+                            ("save_every", self.save_every)):
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"training.{name} 必须是正整数，实际为 {value!r}")
+        for name, value in (("lr", self.lr), ("weight_decay", self.weight_decay)):
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"training.{name} 必须是有限非负数，实际为 {value!r}")
+        if self.gradient_clip_norm is not None and (
+                not isinstance(self.gradient_clip_norm, (int, float))
+                or not math.isfinite(self.gradient_clip_norm)
+                or self.gradient_clip_norm <= 0):
+            raise ValueError(
+                "training.gradient_clip_norm 必须是正有限数或 null，"
+                f"实际为 {self.gradient_clip_norm!r}")
+        for name, value in (("use_dummy_model", self.use_dummy_model),
+                            ("resume", self.resume)):
+            if type(value) is not bool:
+                raise ValueError(f"training.{name} 必须是布尔值，实际为 {value!r}")
+        if not isinstance(self.pretrained, (str, type(None))):
+            raise ValueError(
+                f"training.pretrained 必须是路径字符串或 null，实际为 {self.pretrained!r}")
+        if not isinstance(self.output_dir, str) or not self.output_dir:
+            raise ValueError(
+                f"training.output_dir 必须是非空路径字符串，实际为 {self.output_dir!r}")
+
+    def __post_init__(self) -> None:
+        """构造时校验训练参数并同步校验 FSDP 子配置。"""
+        self.fsdp.validate()
+        self.validate()
 
 
 @dataclass
@@ -95,6 +179,11 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+
+    def validate(self) -> None:
+        """校验完整顶层配置。"""
+        self.training.fsdp.validate()
+        self.training.validate()
 
 
 def _update_dataclass(obj: Any, values: dict[str, Any]) -> None:
@@ -111,9 +200,10 @@ def _update_dataclass(obj: Any, values: dict[str, Any]) -> None:
 
 
 def load_config(path: str | Path) -> Config:
-    """从 YAML 加载配置并校验键名。"""
+    """从 YAML 加载配置并校验键名与取值。"""
     with open(path, encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     cfg = Config()
     _update_dataclass(cfg, raw)
+    cfg.validate()
     return cfg
