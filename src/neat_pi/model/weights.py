@@ -28,8 +28,11 @@ import re
 import struct
 
 import torch
+import torch.distributed as dist
 from safetensors import safe_open
 from torch import Tensor, nn
+
+from neat_pi.device.backend import DeviceContext
 
 
 _LOCAL_CHECKPOINT_FORMAT = "neat-pi.pi05-local-v1"
@@ -189,6 +192,102 @@ def canonical_pi05_state_dict(model: nn.Module) -> dict[str, Tensor]:
     }
 
 
+def save_pi05_state_dict_safetensors(
+    state: dict[str, Tensor],
+    output_path: str | Path,
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """把 canonical state dict 流式写入单个 safetensors 文件。
+
+    不使用 ``safetensors.torch.save_file`` 的整包序列化路径，避免导出
+    3B+ Pi05 时额外物化一份完整权重。
+    """
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    canonical_state = {
+        internal_to_canonical_name(name): tensor
+        for name, tensor in state.items()
+    }
+    specs: list[_TensorSpec] = []
+    for name, tensor in canonical_state.items():
+        safetensors_dtype = _SAFETENSORS_DTYPES.get(tensor.dtype)
+        if safetensors_dtype is None:
+            raise ValueError(f"不支持的 checkpoint 张量 dtype: {tensor.dtype}")
+        specs.append(_TensorSpec(
+            name=name,
+            dtype=tensor.dtype,
+            shape=tuple(tensor.shape),
+            num_bytes=tensor.numel() * tensor.element_size(),
+        ))
+
+    header: dict[str, object] = {}
+    data_offset = 0
+    for spec in specs:
+        header[spec.name] = {
+            "dtype": _SAFETENSORS_DTYPES[spec.dtype],
+            "shape": list(spec.shape),
+            "data_offsets": [data_offset, data_offset + spec.num_bytes],
+        }
+        data_offset += spec.num_bytes
+    safe_metadata = {
+        key: str(value)
+        for key, value in (metadata or {}).items()
+    }
+    safe_metadata["format"] = _LOCAL_CHECKPOINT_FORMAT
+    header["__metadata__"] = safe_metadata
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    header_bytes += b" " * (-len(header_bytes) % 8)
+
+    output_file = output.with_name(output.name + ".tmp")
+    try:
+        with output_file.open("wb") as stream:
+            stream.write(struct.pack("<Q", len(header_bytes)))
+            stream.write(header_bytes)
+            for spec in specs:
+                tensor = canonical_state[spec.name].detach().contiguous()
+                if tensor.device.type != "cpu":
+                    tensor = tensor.cpu()
+                payload = memoryview(
+                    tensor.flatten().view(torch.uint8).numpy()
+                )
+                if len(payload) != spec.num_bytes:
+                    raise RuntimeError(
+                        f"张量字节数与 header 不一致: {spec.name}")
+                stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        output_file.replace(output)
+    except Exception:
+        output_file.unlink(missing_ok=True)
+        raise
+
+
+def load_pi05_state_dict_safetensors(model: nn.Module,
+                                     path: str | Path) -> None:
+    """把 canonical safetensors 权重加载进 Pi05 的 internal state dict。"""
+    state = model.state_dict()
+    expected_names = set(canonical_pi05_state_dict(model))
+    loaded_names: set[str] = set()
+    with safe_open(str(path), framework="pt") as checkpoint:
+        for canonical_name in checkpoint.keys():
+            internal_name = canonical_to_internal_name(canonical_name)
+            if internal_name not in state:
+                raise KeyError(
+                    f"checkpoint 参数名不在模型中: {canonical_name}")
+            tensor = checkpoint.get_tensor(canonical_name)
+            if state[internal_name].shape != tensor.shape:
+                raise ValueError(
+                    f"形状不匹配: {canonical_name} 模型 "
+                    f"{tuple(state[internal_name].shape)} vs checkpoint "
+                    f"{tuple(tensor.shape)}")
+            state[internal_name].copy_(tensor)
+            loaded_names.add(canonical_name)
+    if loaded_names != expected_names:
+        missing = sorted(expected_names - loaded_names)
+        raise RuntimeError(
+            f"checkpoint 未覆盖 {len(missing)} 个模型参数，第一个: {missing[0]}")
+
+
 def load_pi05_weights(model: nn.Module,
                       checkpoint_dir: str) -> Pi05LoadResult:
     """加载 checkpoint 权重进 model（就地更新），支持原始和本地格式。
@@ -238,6 +337,120 @@ def load_pi05_weights(model: nn.Module,
     expected_skipped = (set() if local_format else
                         {"paligemma_with_expert.gemma_expert.lm_head.weight"})
     if skipped_names != expected_skipped:
+        raise RuntimeError(
+            "显式跳过集不是预期的 action-expert 文本头，"
+            f"实际: {sorted(skipped_names)}")
+    return Pi05LoadResult(
+        checkpoint_dir=Path(checkpoint_dir),
+        loaded_count=len(loaded_names),
+        skipped_count=len(skipped_names),
+    )
+
+
+def load_pi05_weights_distributed(
+    model: nn.Module,
+    checkpoint_dir: str,
+    ctx: DeviceContext,
+) -> Pi05LoadResult:
+    """由 rank0 读取 canonical checkpoint，广播给所有 rank 后就地加载。
+
+    ``world_size == 1`` 时直接回退到现有本地加载路径；分布式时 rank0 是
+    唯一打开 safetensors shard 的进程。所有 rank 只接收一次模型张量并写入
+    自己的未分片模型，随后再交给 FSDP 包装。
+    """
+    if ctx.world_size == 1:
+        return load_pi05_weights(model, checkpoint_dir)
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError("分布式权重加载要求已初始化 torch.distributed")
+
+    source_rank = ctx.rank
+    state = model.state_dict()
+    expected_names = set(canonical_pi05_state_dict(model))
+    loaded_names: set[str] = set()
+    skipped_names: set[str] = set()
+
+    def broadcast_control(control: dict[str, str] | None) -> dict[str, str]:
+        """在所有 rank 间广播一条 checkpoint 控制消息。"""
+        payload = [control if ctx.rank == source_rank else None]
+        dist.broadcast_object_list(payload, src=source_rank)
+        control_value = payload[0]
+        assert isinstance(control_value, dict)
+        return control_value
+
+    def broadcast_tensor(tensor: Tensor) -> None:
+        """在所有 rank 间广播一个与目标参数同 dtype/shape 的张量。"""
+        dist.broadcast(tensor, src=source_rank)
+
+    error_message: str | None = None
+    checkpoint_count = 0
+    if ctx.is_main_process:
+        try:
+            local_format = is_local_pi05_checkpoint(checkpoint_dir)
+            for source_name, tensor in iter_checkpoint_tensors(checkpoint_dir):
+                checkpoint_count += 1
+                canonical_name = (
+                    source_name if local_format
+                    else translate_name(source_name)
+                )
+                skipped = canonical_name is None
+                control = {
+                    "event": "tensor",
+                    "canonical": str(canonical_name) if canonical_name is not None else "",
+                    "skipped": str(skipped),
+                    "label": source_name.removeprefix("model."),
+                }
+                broadcast_control(control)
+                if skipped:
+                    skipped_names.add(source_name.removeprefix("model."))
+                    continue
+                internal_name = canonical_to_internal_name(canonical_name)
+                if internal_name not in state:
+                    raise KeyError(
+                        f"映射后的名字不在模型中: {canonical_name}")
+                if state[internal_name].shape != tensor.shape:
+                    raise ValueError(
+                        f"形状不匹配: {canonical_name} 模型 "
+                        f"{tuple(state[internal_name].shape)} vs checkpoint "
+                        f"{tuple(tensor.shape)}")
+                payload = state[internal_name].detach().clone()
+                payload.copy_(tensor)
+                broadcast_tensor(payload)
+                loaded_names.add(canonical_name)
+            broadcast_control({"event": "done"})
+        except Exception as exc:
+            error_message = f"{type(exc).__name__}: {exc}"
+            broadcast_control({
+                "event": "error",
+                "message": error_message,
+            })
+            raise RuntimeError(error_message) from exc
+    else:
+        while True:
+            control = broadcast_control(None)
+            event = control.get("event")
+            if event == "done":
+                break
+            if event == "error":
+                raise RuntimeError(control.get("message", "rank0 加载失败"))
+            checkpoint_count += 1
+            canonical_name = control["canonical"]
+            if control.get("skipped") == "True":
+                skipped_names.add(control["label"])
+                continue
+            internal_name = canonical_to_internal_name(canonical_name)
+            payload = state[internal_name].detach().clone()
+            broadcast_tensor(payload)
+            state[internal_name].copy_(payload)
+            loaded_names.add(canonical_name)
+
+    if loaded_names != expected_names:
+        missing = sorted(expected_names - loaded_names)
+        raise RuntimeError(
+            f"checkpoint 未覆盖 {len(missing)} 个模型参数，第一个: {missing[0]}")
+    if len(loaded_names) + len(skipped_names) != checkpoint_count:
+        raise RuntimeError("checkpoint 张量计数不一致：loaded + skipped != 总数")
+    expected_skipped = {"paligemma_with_expert.gemma_expert.lm_head.weight"}
+    if skipped_names and skipped_names != expected_skipped:
         raise RuntimeError(
             "显式跳过集不是预期的 action-expert 文本头，"
             f"实际: {sorted(skipped_names)}")

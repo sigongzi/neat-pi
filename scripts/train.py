@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import random
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import Any, NamedTuple
 
 import torch
@@ -26,7 +27,13 @@ from torch.utils.data import DataLoader, DistributedSampler
 from neat_pi.config import Config, load_config
 from neat_pi.data.transforms import images_to_float
 from neat_pi.device import backend
+from neat_pi.model.weights import load_pi05_weights_distributed
 from neat_pi.training.checkpoint import save_checkpoint
+from neat_pi.training.checkpoint import (
+    latest_checkpoint_path,
+    load_checkpoint,
+    load_checkpoint_metadata,
+)
 from neat_pi.training.data import build_train_loader
 from neat_pi.training.dummy_model import DummyPi05
 from neat_pi.training.fsdp import clip_grad_norm, wrap_model_fsdp
@@ -90,14 +97,8 @@ def build_model(cfg: Config, ctx: backend.DeviceContext,
     else:
         from neat_pi.model.pi05 import Pi05
 
-        if cfg.training.pretrained:
-            model = Pi05.from_pretrained(
-                cfg.training.pretrained,
-                cfg.model,
-                ctx.device,
-            )
-        else:
-            model = Pi05(cfg.model)
+        # rank0 broadcast 加载逻辑在 run_training 中调用，不在这里打开 checkpoint。
+        model = Pi05(cfg.model)
 
     if ctx.is_main_process:
         model_name = "DummyPi05" if cfg.training.use_dummy_model else "Pi05"
@@ -115,6 +116,9 @@ def train(
     preprocessor: Callable[[dict[str, Any]], dict[str, Any]],
     cfg: Config,
     ctx: backend.DeviceContext,
+    start_step: int = 0,
+    start_epoch: int = 0,
+    start_micro_step: int = 0,
 ) -> None:
     """执行 flow matching 训练循环；step 计数按 optimizer step 计算。"""
     accumulation_steps = cfg.training.grad_accum_steps
@@ -122,9 +126,9 @@ def train(
     model.train()
     optimizer.zero_grad(set_to_none=True)
     data_iter = iter(loader)
-    epoch = 0
-    optimizer_step = 0
-    micro_step = 0
+    epoch = start_epoch
+    optimizer_step = start_step
+    micro_step = start_micro_step
     accumulation_losses: list[torch.Tensor] = []
     if ctx.is_main_process:
         logger.info(
@@ -185,6 +189,11 @@ def train(
                 optimizer_step,
                 cfg.training.output_dir,
                 ctx,
+                fsdp_config=asdict(cfg.training.fsdp),
+                metadata={
+                    "epoch": epoch,
+                    "micro_step": micro_step,
+                },
             )
         accumulation_losses.clear()
 
@@ -226,6 +235,18 @@ def run_training(config_path: str) -> None:
 
         preprocessor = load_preprocessor(cfg)
         model = build_model(cfg, ctx, amp_dtype)
+        if not cfg.training.use_dummy_model and cfg.training.pretrained:
+            load_result = load_pi05_weights_distributed(
+                model,
+                cfg.training.pretrained,
+                ctx,
+            )
+            if ctx.is_main_process:
+                logger.info(
+                    "checkpoint loaded: {} tensors | skipped {}",
+                    load_result.loaded_count,
+                    load_result.skipped_count,
+                )
         model = wrap_model_fsdp(
             model,
             cfg.training.fsdp,
@@ -238,6 +259,25 @@ def run_training(config_path: str) -> None:
             weight_decay=cfg.training.weight_decay,
         )
 
+        start_step = 0
+        start_epoch = 0
+        start_micro_step = 0
+        if cfg.training.resume:
+            checkpoint_path = latest_checkpoint_path(cfg.training.output_dir)
+            if checkpoint_path is None:
+                raise FileNotFoundError(
+                    f"resume=true 但没有可用 checkpoint: {cfg.training.output_dir}")
+            start_step = load_checkpoint(
+                model,
+                optimizer,
+                checkpoint_path,
+            )
+            checkpoint_metadata = load_checkpoint_metadata(checkpoint_path)
+            start_epoch = int(checkpoint_metadata.get("epoch", 0))
+            start_micro_step = int(checkpoint_metadata.get("micro_step", 0))
+            if ctx.is_main_process:
+                logger.info("恢复训练: {} | step {}", checkpoint_path, start_step)
+
         train(
             model=model,
             loader=loader,
@@ -246,6 +286,9 @@ def run_training(config_path: str) -> None:
             preprocessor=preprocessor,
             cfg=cfg,
             ctx=ctx,
+            start_step=start_step,
+            start_epoch=start_epoch,
+            start_micro_step=start_micro_step,
         )
     finally:
         backend.cleanup_distributed()
