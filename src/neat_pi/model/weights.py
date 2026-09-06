@@ -1,25 +1,77 @@
-"""pi05 权重的加载与保存：与 openpi checkpoint 的名字映射集中在这里。
+"""pi05 权重的加载、转换与保存：checkpoint 参数名映射集中在这里。
 
 设计约束（沿用旧项目的硬件教训）：
 - checkpoint 可能 ~7.5GB，禁止一次性读入内存 dict；
   一律用 safetensors.safe_open 的 memory-mapped 惰性读取，按名取张量；
-- 加载流程为"组件级"：取一个子模块的权重 -> copy_ 进模型 -> 释放引用。
+- 加载流程为逐张量 mmap -> copy_，不做一次性 checkpoint dict 转换；
+- 只允许 checkpoint 里的 action-expert 文本头显式跳过，其余名字必须全部
+  映射并写入模型；模型参数也必须全部被写入。
 
-权重对应关系（骨架，实现时对照 ref/openpi 补全）：
-- openpi PaliGemma llm.*      -> mot.layers.{i}.vlm.*
-- openpi action expert 层参数  -> mot.layers.{i}.action.*
-- openpi SigLIP vision tower   -> vision.*
-- openpi VLM token embedding   -> tied 到 lm_head.weight（无独立 embed_tokens）
+还提供 NeatPi 本地权重格式：它已经保存为 Pi05 的 state_dict 名，并在
+safetensors metadata 中写入格式标记，加载时不再做名字翻译。转换产物固定
+为单个 model.safetensors，写入时逐张量流式拷贝，不聚合整个模型。
+
+checkpoint 当前保存的键不带 `model.` 顶层包装，例如：
+``paligemma_with_expert.paligemma.model.language_model.layers.0.*``。
+较早导出的键则形如 ``model.paligemma_with_expert.*``；加载器统一先剥掉
+这个可选顶层前缀，再映射到 Pi05 的模块名。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
+from dataclasses import dataclass
+import json
+import os
+import struct
 
 import torch
 from safetensors import safe_open
 from torch import Tensor, nn
+
+
+_LOCAL_CHECKPOINT_FORMAT = "neat-pi.pi05-local-v1"
+
+
+@dataclass(frozen=True)
+class Pi05ConversionResult:
+    """一次 checkpoint 转换的统计结果。"""
+
+    output_dir: Path
+    loaded_count: int
+    skipped_count: int
+    shard_count: int
+
+
+@dataclass(frozen=True)
+class _TensorSpec:
+    """单个输出张量的 safetensors header 信息。"""
+
+    name: str
+    dtype: torch.dtype
+    shape: tuple[int, ...]
+    num_bytes: int
+
+
+_SAFETENSORS_DTYPES = {
+    torch.float64: "F64",
+    torch.float32: "F32",
+    torch.float16: "F16",
+    torch.bfloat16: "BF16",
+    torch.int64: "I64",
+    torch.int32: "I32",
+    torch.int16: "I16",
+    torch.int8: "I8",
+    torch.uint8: "U8",
+    torch.bool: "BOOL",
+}
+
+
+def _checkpoint_shards(checkpoint_dir: str) -> list[Path]:
+    """列出模型权重 shard；不匹配 processor 等其他 safetensors 文件。"""
+    root = Path(checkpoint_dir)
+    return sorted(root.glob("model*.safetensors"))
 
 
 def iter_checkpoint_tensors(checkpoint_dir: str) -> Iterator[tuple[str, Tensor]]:
@@ -27,8 +79,7 @@ def iter_checkpoint_tensors(checkpoint_dir: str) -> Iterator[tuple[str, Tensor]]
 
     支持单个 model.safetensors 或分片的 model-*.safetensors。
     """
-    root = Path(checkpoint_dir)
-    shards = sorted(root.glob("*.safetensors"))
+    shards = _checkpoint_shards(checkpoint_dir)
     if not shards:
         raise FileNotFoundError(f"{checkpoint_dir} 下没有 safetensors 文件")
     for shard in shards:
@@ -37,36 +88,217 @@ def iter_checkpoint_tensors(checkpoint_dir: str) -> Iterator[tuple[str, Tensor]]
                 yield name, f.get_tensor(name)
 
 
-def translate_name(openpi_name: str) -> str:
-    """把 openpi checkpoint 的参数名翻译成本模型的 state_dict 名。
+def is_local_pi05_checkpoint(checkpoint_dir: str) -> bool:
+    """判断 checkpoint 是否已是使用 Pi05 参数名的 NeatPi 本地格式。"""
+    shards = _checkpoint_shards(checkpoint_dir)
+    if not shards:
+        return False
+    with safe_open(str(shards[0]), framework="pt") as checkpoint:
+        metadata = checkpoint.metadata() or {}
+    return metadata.get("format") == _LOCAL_CHECKPOINT_FORMAT
 
-    TODO: 对照 ref/openpi 实现完整的映射规则（上面 docstring 的四类）。
-    checkpoint 是 transformers/PyTorch 命名（`model.paligemma_with_expert.*`，
-    层索引为 `.layers.{N}`），直接按名字映射即可，无需 kernel 转置。
+
+def translate_name(checkpoint_name: str) -> str | None:
+    """把 checkpoint 参数名翻译成 Pi05 的 state_dict 名。
+
+    checkpoint 统一按 ``paligemma_with_expert.*`` 组织；兼容较早导出格式
+    额外携带的 ``model.`` 顶层前缀。返回 None 表示该张量是显式跳过的
+    action-expert 文本生成头（本模型不实现文本生成）。未知名字一律不
+    做静默映射。
     """
-    raise NotImplementedError("待对照 ref/openpi 权重名实现")
+    name = checkpoint_name.removeprefix("model.")
+
+    if name == "paligemma_with_expert.gemma_expert.lm_head.weight":
+        return None
+
+    rules = (
+        ("paligemma_with_expert.paligemma.model.vision_tower.vision_model.",
+         "vision_tower."),
+        ("paligemma_with_expert.paligemma.model.language_model.",
+         "language_model."),
+        ("paligemma_with_expert.paligemma.model.multi_modal_projector.",
+         "multi_modal_projector."),
+        ("paligemma_with_expert.gemma_expert.model.layers.",
+         "action_expert.layers."),
+        ("paligemma_with_expert.gemma_expert.model.norm.",
+         "action_expert.norm."),
+    )
+    for checkpoint_prefix, model_prefix in rules:
+        if name.startswith(checkpoint_prefix):
+            return model_prefix + name[len(checkpoint_prefix):]
+
+    # paligemma 的 lm_head 既是 VLM 文本头也是 tied token embedding。
+    if name == "paligemma_with_expert.paligemma.lm_head.weight":
+        return "language_model.lm_head.weight"
+
+    action_direct_names = (
+        "action_in_proj.",
+        "action_out_proj.",
+        "time_mlp_in.",
+        "time_mlp_out.",
+    )
+    if name.startswith(action_direct_names):
+        return "action_expert." + name
+
+    raise ValueError(f"无法映射的 checkpoint 参数名: {checkpoint_name}")
 
 
 def load_pi05_weights(model: nn.Module, checkpoint_dir: str) -> None:
-    """把 openpi 格式 checkpoint 加载进 model（就地更新参数）。
+    """加载 checkpoint 权重进 model（就地更新），支持原始和本地格式。
 
-    逐张量 copy_ 并校验形状；遇到无法映射的名字应报错而不是跳过——
-    静默丢权重比直接失败更难排查（AGENTS.md 运行规则）。
+    原始 checkpoint 先用 translate_name 转换名字；NeatPi 本地格式的名字
+    已经与 state_dict 一致，直接按名加载。两种路径都逐张量 copy_ 并校验
+    形状；未知名字和双向遗漏都直接报错。
     """
     state = model.state_dict()
-    loaded = 0
-    for openpi_name, tensor in iter_checkpoint_tensors(checkpoint_dir):
-        local_name = translate_name(openpi_name)
+    local_format = is_local_pi05_checkpoint(checkpoint_dir)
+    expected_names = set(state)
+    loaded_names: set[str] = set()
+    skipped_names: set[str] = set()
+    checkpoint_count = 0
+    for checkpoint_name, tensor in iter_checkpoint_tensors(checkpoint_dir):
+        checkpoint_count += 1
+        local_name = (checkpoint_name if local_format
+                      else translate_name(checkpoint_name))
+        if local_name is None:
+            skipped_names.add(checkpoint_name)
+            continue
         if local_name not in state:
-            raise KeyError(f"映射后的名字不在模型中: {local_name} (来自 {openpi_name})")
+            source_label = ("本地名字" if local_format
+                            else f"来自 {checkpoint_name}")
+            raise KeyError(
+                f"映射后的名字不在模型中: {local_name} ({source_label})")
+        if local_name in loaded_names:
+            raise ValueError(f"映射后的模型参数被重复写入: {local_name}")
         if state[local_name].shape != tensor.shape:
             raise ValueError(
                 f"形状不匹配: {local_name} 模型 {tuple(state[local_name].shape)} "
                 f"vs checkpoint {tuple(tensor.shape)}")
         state[local_name].copy_(tensor)
-        loaded += 1
-    if loaded == 0:
-        raise RuntimeError(f"没有加载任何权重，请检查 {checkpoint_dir}")
+        loaded_names.add(local_name)
+
+    if loaded_names != expected_names:
+        missing = sorted(expected_names - loaded_names)
+        raise RuntimeError(
+            f"checkpoint 未覆盖 {len(missing)} 个模型参数，第一个: {missing[0]}")
+    if len(loaded_names) + len(skipped_names) != checkpoint_count:
+        raise RuntimeError(
+            "checkpoint 张量计数不一致：loaded + skipped != checkpoint 总数；"
+            "请检查 safetensors 是否包含重复键")
+    expected_skipped = (set() if local_format else
+                        {"paligemma_with_expert.gemma_expert.lm_head.weight"})
+    if skipped_names != expected_skipped:
+        raise RuntimeError(
+            "显式跳过集不是预期的 action-expert 文本头，"
+            f"实际: {sorted(skipped_names)}")
+
+
+def convert_pi05_checkpoint(source_dir: str, output_dir: str,
+                            ) -> Pi05ConversionResult:
+    """把 checkpoint 另存为单文件 NeatPi 本地名格式，返回转换统计。
+
+    输入可以是原始 checkpoint，也可以是已转换的多 shard 本地格式；本地
+    输入按名字原样合并。输出固定为 ``model.safetensors``：先生成逐张量
+    数据偏移的 header，再按同一顺序流式拷贝数据，因此不把全部权重聚合
+    到内存。action-expert 的文本生成头只在原始输入中出现时丢弃。
+    """
+    source_path = Path(source_dir).resolve()
+    output_path = Path(output_dir).resolve()
+    if source_path == output_path:
+        raise ValueError("output_dir 不能与 source_dir 相同")
+    if output_path.exists() and any(output_path.iterdir()):
+        raise ValueError(f"output_dir 必须为空或不存在的目录: {output_path}")
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    source_is_local = is_local_pi05_checkpoint(source_dir)
+    specs: list[_TensorSpec] = []
+    loaded_names: set[str] = set()
+    skipped_count = 0
+
+    def mapped_checkpoint_tensors(count_skips: bool) -> (
+            Iterator[tuple[str, Tensor]]):
+        """按本地名遍历模型张量，并统计原始输入中的显式跳过张量。"""
+        nonlocal skipped_count
+        for source_name, tensor in iter_checkpoint_tensors(source_dir):
+            local_name = (source_name if source_is_local
+                          else translate_name(source_name))
+            if local_name is None:
+                if count_skips:
+                    skipped_count += 1
+                continue
+            yield local_name, tensor
+
+    for local_name, tensor in mapped_checkpoint_tensors(count_skips=True):
+        if local_name in loaded_names:
+            raise ValueError(f"映射后的模型参数重复出现: {local_name}")
+
+        safetensors_dtype = _SAFETENSORS_DTYPES.get(tensor.dtype)
+        if safetensors_dtype is None:
+            raise ValueError(f"不支持的 checkpoint 张量 dtype: {tensor.dtype}")
+        specs.append(_TensorSpec(
+            name=local_name,
+            dtype=tensor.dtype,
+            shape=tuple(tensor.shape),
+            num_bytes=tensor.numel() * tensor.element_size(),
+        ))
+        loaded_names.add(local_name)
+
+    if not loaded_names:
+        raise RuntimeError(f"没有可转换的模型权重，请检查 {source_dir}")
+
+    header: dict[str, object] = {}
+    data_offset = 0
+    for spec in specs:
+        header[spec.name] = {
+            "dtype": _SAFETENSORS_DTYPES[spec.dtype],
+            "shape": list(spec.shape),
+            "data_offsets": [data_offset, data_offset + spec.num_bytes],
+        }
+        data_offset += spec.num_bytes
+    header["__metadata__"] = {"format": _LOCAL_CHECKPOINT_FORMAT}
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    header_bytes += b" " * (-len(header_bytes) % 8)
+
+    output_file = output_path / "model.safetensors.tmp"
+    try:
+        with output_file.open("wb") as output:
+            output.write(struct.pack("<Q", len(header_bytes)))
+            output.write(header_bytes)
+            data_bytes_written = 0
+            for spec, (local_name, tensor) in zip(
+                    specs, mapped_checkpoint_tensors(count_skips=False),
+                    strict=True):
+                if local_name != spec.name:
+                    raise RuntimeError(
+                        "两次遍历 checkpoint 的张量顺序不一致: "
+                        f"{local_name} != {spec.name}")
+                if (tuple(tensor.shape) != spec.shape
+                        or tensor.dtype != spec.dtype):
+                    raise RuntimeError(
+                        f"两次遍历 checkpoint 的张量不一致: {spec.name}")
+                payload = memoryview(
+                    tensor.contiguous().flatten().view(torch.uint8).numpy())
+                if len(payload) != spec.num_bytes:
+                    raise RuntimeError(f"张量字节数不一致: {spec.name}")
+                output.write(payload)
+                data_bytes_written += len(payload)
+            if data_bytes_written != data_offset:
+                raise RuntimeError(
+                    "输出数据长度与 safetensors header 不一致: "
+                    f"{data_bytes_written} != {data_offset}")
+            output.flush()
+            os.fsync(output.fileno())
+        output_file.replace(output_path / "model.safetensors")
+    except Exception:
+        output_file.unlink(missing_ok=True)
+        raise
+
+    return Pi05ConversionResult(
+        output_dir=output_path,
+        loaded_count=len(loaded_names),
+        skipped_count=skipped_count,
+        shard_count=1,
+    )
 
 
 # checkpoint 里视觉塔的尾部前缀；本地 SigLIPVisionEncoder 的 state_dict 相对

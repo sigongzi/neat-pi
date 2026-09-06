@@ -78,14 +78,21 @@ class Pi05(FlowMatchingModel):
         )
 
     @classmethod
-    def from_pretrained(cls, checkpoint_dir: str, cfg: ModelConfig,
-                        device: torch.device) -> "Pi05":
-        """构造模型并从 openpi 格式 checkpoint 加载权重。"""
+    def from_pretrained(cls, checkpoint_dir: str,
+                        cfg: ModelConfig | None = None,
+                        device: torch.device | None = None) -> "Pi05":
+        """构造模型并从原始或已转换的 checkpoint 直接加载权重。
+
+        pi05_base 的结构默认值与 ``ModelConfig`` 相同，因此推理可直接省略
+        cfg；训练 / 小配置实验显式传入，避免隐式依赖 checkpoint 目录里的
+        第二份结构配置。未指定设备时保持 CPU，由调用方继续做设备抽象与
+        搬移。
+        """
         from neat_pi.model.weights import load_pi05_weights
 
-        model = cls(cfg)
+        model = cls(cfg or ModelConfig())
         load_pi05_weights(model, checkpoint_dir)
-        return model.to(device)
+        return model if device is None else model.to(device)
 
     @typechecked
     def embed_prefix(self, images: list[ImageBCHW],
