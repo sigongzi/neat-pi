@@ -24,6 +24,7 @@ import torch.distributed as dist
 class DeviceType(str, Enum):
     """支持的设备类型。新增硬件在这里加分支。"""
 
+    CPU = "cpu"
     CUDA = "cuda"
     NPU = "npu"
 
@@ -51,6 +52,8 @@ class DeviceContext:
 
 def _torch_device_module(device_type: DeviceType):
     """返回 torch 侧的设备模块（torch.cuda / torch.npu）。"""
+    if device_type is DeviceType.CPU:
+        raise ValueError("CPU 设备没有 torch.cuda/torch.npu 设备模块")
     if device_type is DeviceType.NPU:
         # torch_npu 导入后会在 torch 上注册 npu 设备
         import torch_npu  # noqa: F401
@@ -73,6 +76,8 @@ def init_device(device_type: str, local_rank: int | None = None) -> DeviceContex
     单进程调试时不带这些变量，退化为单卡。
     """
     dtype = DeviceType(device_type)
+    if dtype is DeviceType.CPU:
+        return DeviceContext(type=dtype, device=torch.device("cpu"))
     mod = _torch_device_module(dtype)
 
     env_rank = int(os.environ.get("RANK", "0"))
@@ -122,3 +127,24 @@ def autocast(ctx: DeviceContext, dtype: torch.dtype) -> Iterator[None]:
     # torch.autocast 的 device_type 参数对 cuda/npu 通用（npu 需 torch_npu 注册）
     with torch.autocast(device_type=ctx.type.value, dtype=dtype):
         yield
+
+
+def synchronize(ctx: DeviceContext) -> None:
+    """等待指定设备上的全部计算完成；CPU 是 no-op。"""
+    if ctx.type is DeviceType.CPU:
+        return
+    _torch_device_module(ctx.type).synchronize()
+
+
+def reset_peak_memory_stats(ctx: DeviceContext) -> None:
+    """重置指定设备的峰值内存统计；CPU 是 no-op。"""
+    if ctx.type is DeviceType.CPU:
+        return
+    _torch_device_module(ctx.type).reset_peak_memory_stats()
+
+
+def max_memory_allocated(ctx: DeviceContext) -> int:
+    """返回指定设备的峰值分配字节数；CPU 固定为 0。"""
+    if ctx.type is DeviceType.CPU:
+        return 0
+    return int(_torch_device_module(ctx.type).max_memory_allocated())

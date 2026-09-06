@@ -40,7 +40,7 @@ def test_eval_config_matches_checkpoint_contract() -> None:
         "action_horizon": 50,
     }
     assert config["actions"]["raw_dim"] == 7
-    assert config["actions"]["flow_steps"] == 10
+    assert config["actions"]["flow_steps"] == 50
     assert config["actions"]["normalization"] == "MEAN_STD"
     assert config["state"]["raw_dim"] == 8
     assert config["state"]["normalization"] == "MEAN_STD"

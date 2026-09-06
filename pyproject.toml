@@ -18,6 +18,11 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[project.optional-dependencies]
+libero = [
+    "lerobot[libero]>=0.5",  # LIBERO rollout 仿真栈，仅评测入口需要
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",  # 单元测试（tests/ 目录）

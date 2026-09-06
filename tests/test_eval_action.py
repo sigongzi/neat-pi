@@ -42,6 +42,7 @@ def test_from_config_uses_checkpoint_action_contract() -> None:
     adapter = _adapter()
     config = _load_config()
     assert adapter.action_horizon == config["model"]["action_horizon"]
+    assert adapter.execution_horizon == config["actions"]["execution_horizon"]
     assert adapter.raw_action_dim == config["actions"]["raw_dim"]
     assert adapter.model_action_dim == config["model"]["max_action_dim"]
     assert adapter.clip_bounds == tuple(config["env"]["clip_bounds"])
@@ -50,16 +51,16 @@ def test_from_config_uses_checkpoint_action_contract() -> None:
 
 
 def test_submit_slices_unnormalizes_clips_and_queues_chunk() -> None:
-    """一次采样入队完整 50 步，只有前 7 维参与 postprocessor。"""
+    """一次采样入队 execution_horizon 步，只有前 7 维参与 postprocessor。"""
     adapter = _adapter()
     model_actions = _model_actions()
     queued = adapter.submit(model_actions)
 
-    assert queued == 50
+    assert queued == 10
     assert adapter.model_calls == 1
-    assert adapter.pending_count == 50
+    assert adapter.pending_count == 10
 
-    popped = [adapter.pop_action() for _ in range(50)]
+    popped = [adapter.pop_action() for _ in range(10)]
     assert all(action.shape == (7,) for action in popped)
     assert all(action.dtype is torch.float32 for action in popped)
     assert all(torch.isfinite(action).all() for action in popped)
@@ -67,24 +68,35 @@ def test_submit_slices_unnormalizes_clips_and_queues_chunk() -> None:
                for action in popped)
     assert adapter.pending_count == 0
 
-    expected = adapter.postprocessor(model_actions[..., :7])[0]
+    expected = adapter.postprocessor(model_actions[:, :10, :7])[0]
     expected = expected.clamp(-1.0, 1.0)
     torch.testing.assert_close(torch.stack(popped), expected)
 
 
 def test_queue_must_drain_before_new_model_call() -> None:
-    """旧 checkpoint 每次采样后必须消费完整 chunk。"""
+    """每次采样后必须消费 execution_horizon 步再重新推理。"""
     adapter = _adapter()
     adapter.submit(_model_actions(seed=1))
-    assert adapter.pending_count == 50
+    assert adapter.pending_count == 10
     with pytest.raises(RuntimeError, match="不能提交新 chunk"):
         adapter.submit(_model_actions(seed=2))
 
-    for _ in range(50):
+    for _ in range(10):
         adapter.pop_action()
     assert adapter.pending_count == 0
-    assert adapter.submit(_model_actions(seed=3)) == 50
+    assert adapter.submit(_model_actions(seed=3)) == 10
     assert adapter.model_calls == 2
+
+
+def test_reset_clears_queue_and_model_call_count() -> None:
+    """每个 episode 开始前必须重置跨 episode 的 queue 与统计。"""
+    adapter = _adapter()
+    adapter.submit(_model_actions(seed=5))
+    adapter.reset()
+    assert adapter.pending_count == 0
+    assert adapter.model_calls == 0
+    with pytest.raises(IndexError, match="action queue 已空"):
+        adapter.pop_action()
 
 
 def test_configured_clip_bounds_are_applied() -> None:
@@ -93,7 +105,7 @@ def test_configured_clip_bounds_are_applied() -> None:
     config["env"]["clip_bounds"] = [-0.25, 0.25]
     adapter = _adapter(config)
     adapter.submit(_model_actions(seed=4))
-    actions = torch.stack([adapter.pop_action() for _ in range(50)])
+    actions = torch.stack([adapter.pop_action() for _ in range(10)])
     assert (actions >= -0.25).all()
     assert (actions <= 0.25).all()
 
@@ -105,6 +117,14 @@ def test_invalid_model_shape_is_rejected() -> None:
         adapter.submit(torch.zeros(1, 32, 32))
     with pytest.raises(ValueError, match="shape"):
         adapter.submit(torch.zeros(1, 50, 7))
+
+
+def test_invalid_execution_horizon_is_rejected() -> None:
+    """execution horizon 不能超过模型 chunk 长度。"""
+    config = _load_config()
+    config["actions"]["execution_horizon"] = 51
+    with pytest.raises(ValueError, match="execution_horizon"):
+        _adapter(config)
 
 
 def test_pop_empty_queue_raises() -> None:

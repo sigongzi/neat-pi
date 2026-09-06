@@ -16,10 +16,11 @@ from neat_pi.typing import ActionBHD, ActionCommand7, typechecked
 
 @dataclass
 class LiberoActionAdapter:
-    """unnormalize、裁剪并缓存一个完整 pi05 action chunk。"""
+    """unnormalize、裁剪并缓存每次推理要执行的 pi05 action 前缀。"""
 
     postprocessor: PolicyProcessorPipeline
     action_horizon: int
+    execution_horizon: int
     raw_action_dim: int
     model_action_dim: int
     clip_bounds: tuple[float, float]
@@ -35,6 +36,7 @@ class LiberoActionAdapter:
         model = eval_config["model"]
         actions = eval_config["actions"]
         action_horizon = int(model["action_horizon"])
+        execution_horizon = int(actions["execution_horizon"])
         raw_action_dim = int(actions["raw_dim"])
         model_action_dim = int(model["max_action_dim"])
         bounds_value = eval_config["env"]["clip_bounds"]
@@ -45,11 +47,16 @@ class LiberoActionAdapter:
             raise ValueError(
                 f"旧 checkpoint 只支持 MEAN_STD 动作归一化，"
                 f"实际 {actions['normalization']}")
+        if not 0 < execution_horizon <= action_horizon:
+            raise ValueError(
+                "execution_horizon 必须在 (0, action_horizon] 内，"
+                f"实际 {execution_horizon}")
         postprocessor_path = resolve_config_path(
             eval_config["normalization"]["postprocessor_path"], config_root)
         return cls(
             postprocessor=load_postprocessor_file(postprocessor_path),
             action_horizon=action_horizon,
+            execution_horizon=execution_horizon,
             raw_action_dim=raw_action_dim,
             model_action_dim=model_action_dim,
             clip_bounds=clip_bounds,
@@ -60,12 +67,18 @@ class LiberoActionAdapter:
         """当前 action queue 中还未执行的步数。"""
         return len(self.pending_actions)
 
+    def reset(self) -> None:
+        """清空跨 episode 不应延续的 action queue 与模型调用计数。"""
+        self.pending_actions.clear()
+        self.model_calls = 0
+
     @typechecked
     def submit(self, model_actions: ActionBHD) -> int:
         """处理一次 sample_actions 输出，返回入队步数。
 
-        旧 checkpoint 消费完整 chunk；queue 未清空时禁止覆盖。模型输出
-        的第 7 维之后是 padding，先截取再 unnormalize。
+        官方 LIBERO 评测每次采样只执行前 execution_horizon 步；queue 未
+        清空时禁止覆盖。模型输出的第 7 维之后是 padding，先截取再
+        unnormalize。
         """
         if tuple(model_actions.shape) != (
                 1, self.action_horizon, self.model_action_dim):
@@ -77,23 +90,27 @@ class LiberoActionAdapter:
             raise RuntimeError(
                 f"action queue 未消费完（剩余 {self.pending_count} 步），"
                 "不能提交新 chunk")
-        raw_actions = model_actions.detach().to(device="cpu").float()
-        actions = self.postprocessor(raw_actions[..., :self.raw_action_dim])
+        raw_actions = (
+            model_actions.detach().to(device="cpu").float()
+           [:, :self.execution_horizon, :self.raw_action_dim]
+        )
+        actions = self.postprocessor(raw_actions)
         actions = actions.to(device="cpu").float()
-        if tuple(actions.shape) != (1, self.action_horizon, self.raw_action_dim):
+        if tuple(actions.shape) != (
+                1, self.execution_horizon, self.raw_action_dim):
             raise ValueError(
                 "postprocessor 输出 shape 应为 "
-                f"(1, {self.action_horizon}, {self.raw_action_dim})，"
+                f"(1, {self.execution_horizon}, {self.raw_action_dim})，"
                 f"实际 {tuple(actions.shape)}")
         if not torch.isfinite(actions).all():
             raise ValueError("postprocessor 输出包含 NaN/Inf")
         actions = actions.clamp(self.clip_bounds[0], self.clip_bounds[1])
         self.pending_actions.extend(
             actions[0, action_index].clone()
-            for action_index in range(self.action_horizon)
+            for action_index in range(self.execution_horizon)
         )
         self.model_calls += 1
-        return self.action_horizon
+        return self.execution_horizon
 
     @typechecked
     def pop_action(self) -> ActionCommand7:

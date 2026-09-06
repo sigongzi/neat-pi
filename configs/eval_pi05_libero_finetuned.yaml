@@ -18,7 +18,8 @@ model:
 
 actions:
   raw_dim: 7
-  flow_steps: 10
+  execution_horizon: 10  # 官方 LIBERO 复现每次采样只执行前 10 步
+  flow_steps: 50  # 本轮 Stage D partial 实验：更多 flow Euler 步
   normalization: MEAN_STD
 
 cameras:
@@ -49,10 +50,12 @@ normalization:
   postprocessor_path: eval_pi05_libero_finetuned_postprocessor.json
 
 env:
+  seed: 1000
   suites:
     - libero_spatial
   task_ids: null        # null 表示选中 suite 的全部 task
   episodes_per_task: 3
+  max_steps: null       # null 使用 LeRobot LIBERO suite 的默认 max steps
   use_init_states: true
   observation_size: [256, 256]
   control_mode: relative
