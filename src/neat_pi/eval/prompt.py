@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from lerobot.processor import PolicyProcessorPipeline
 
 from neat_pi.data.preprocessor import load_preprocessor_file
+from neat_pi.eval.config import resolve_config_path
 from neat_pi.data.tokenizer import GemmaTokenizerStep
 from neat_pi.eval.observation import Pi05EvalObservation
 from neat_pi.typing import MaskBL, TokenIdsBL, typechecked
@@ -36,9 +37,8 @@ class LiberoPromptTokenizerAdapter:
                     ) -> "LiberoPromptTokenizerAdapter":
         """从 eval YAML 配置构造 adapter，并校验 tokenizer 合同没有漂移。"""
         normalization = eval_config["normalization"]
-        path = Path(normalization["preprocessor_path"])
-        if not path.is_absolute() and config_root is not None:
-            path = Path(config_root) / path
+        path = resolve_config_path(
+            normalization["preprocessor_path"], config_root)
         preprocessor = load_preprocessor_file(path)
         tokenizer_steps = [
             step for step in preprocessor.steps

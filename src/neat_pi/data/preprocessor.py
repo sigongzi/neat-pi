@@ -38,6 +38,25 @@ def load_preprocessor_file(preprocessor_path: str | Path,
     )
 
 
+def load_postprocessor_file(postprocessor_path: str | Path,
+                            ) -> PolicyProcessorPipeline:
+    """从 JSON 文件加载 policy 后处理管线并返回。
+
+    输入/输出转换固定为 policy action tensor，适配推理侧动作块。
+    """
+    import lerobot.policies.pi05.processor_pi05  # noqa: F401  注册 pi05 step
+
+    path = Path(postprocessor_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"postprocessor JSON 不存在: {path}")
+    return PolicyProcessorPipeline.from_pretrained(
+        str(path),
+        config_filename=path.name,
+        to_transition=policy_action_to_transition,
+        to_output=transition_to_policy_action,
+    )
+
+
 def load_preprocessor(cfg: Config) -> PolicyProcessorPipeline:
     """按 cfg.data.preprocessor_path 的 JSON 文件加载预处理管线并返回。
     """
@@ -56,9 +75,4 @@ def load_postprocessor(cfg: Config) -> PolicyProcessorPipeline:
     """
     if not cfg.data.postprocessor_path:
         raise ValueError("data.postprocessor_path 未设置：需指向 policy_postprocessor.json")
-    return PolicyProcessorPipeline.from_pretrained(
-        cfg.data.postprocessor_path,
-        config_filename="policy_postprocessor.json",
-        to_transition=policy_action_to_transition,
-        to_output=transition_to_policy_action,
-    )
+    return load_postprocessor_file(cfg.data.postprocessor_path)

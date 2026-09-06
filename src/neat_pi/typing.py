@@ -30,6 +30,9 @@ StateB8 = TensorType["batch", 8]
 QuatB4 = TensorType["batch", 4]
 AxisAngleB3 = TensorType["batch", 3]
 
+# LIBERO 单步可执行动作：[7]，对应 [dpos(3), axis-angle(3), gripper(1)]。
+ActionCommand7 = TensorType[7]
+
 # 相机可用性 mask：[batch]，True 表示该相机图像有效。缺失相机保留固定
 # token 槽位时，其所有视觉 token 的 prefix mask 由此 mask 展开为 False。
 MaskB = TensorType["batch", torch.bool]
