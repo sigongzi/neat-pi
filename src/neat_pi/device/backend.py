@@ -15,7 +15,7 @@ import os
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterator
+from collections.abc import Generator
 
 import torch
 import torch.distributed as dist
@@ -118,7 +118,7 @@ def get_amp_dtype(name: str) -> torch.dtype:
 
 
 @contextmanager
-def autocast(ctx: DeviceContext, dtype: torch.dtype) -> Iterator[None]:
+def autocast(ctx: DeviceContext, dtype: torch.dtype) -> Generator[None]:
     """按设备类型开混合精度上下文；float32 训练时是 no-op。"""
     if dtype is torch.float32:
         with nullcontext():

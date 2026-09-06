@@ -116,7 +116,7 @@ def run_training(config_path: str) -> None:
 
     # 3. 模型 + FSDP（单卡时原样返回）
     model = build_model(cfg, ctx, amp_dtype)
-    model = wrap_model_fsdp(model, cfg.training.fsdp, ctx)
+    model = wrap_model_fsdp(model, cfg.training.fsdp, ctx, amp_dtype)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr,
                                   weight_decay=cfg.training.weight_decay)
 
