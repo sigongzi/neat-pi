@@ -50,6 +50,21 @@ def fsdp_activation_checkpoint_classes() -> tuple[type[nn.Module], ...]:
     return _CHECKPOINT_CLASSES
 
 
+def clip_grad_norm(
+    model: nn.Module,
+    max_norm: float,
+    norm_type: float | int = 2.0,
+) -> torch.Tensor:
+    """按 FSDP 分片语义裁剪梯度；普通模型回退到 PyTorch 工具函数。"""
+    if isinstance(model, FullyShardedDataParallel):
+        return model.clip_grad_norm_(max_norm, norm_type)
+    return torch.nn.utils.clip_grad_norm_(
+        model.parameters(),
+        max_norm,
+        norm_type=norm_type,
+    )
+
+
 def _sharding_strategy(name: str) -> ShardingStrategy:
     """把 YAML 中的 sharding 策略映射为 PyTorch FSDP enum。"""
     strategies = {

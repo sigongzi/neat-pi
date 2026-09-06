@@ -4,30 +4,32 @@
 分布式拓扑由 torchrun 环境变量提供（见 scripts/train.sh）。
 
 流程：
-1. 加载配置 -> 2. 初始化设备/分布式（device.backend）->
-3. 构建数据（LeRobot v3.1 + preprocessor 管线）-> 4. 构建模型 ->
-5. FSDP 包装 -> 6. 训练循环（flow matching 损失）。
+1. 加载配置 -> 2. 初始化设备/分布式 -> 3. 构建分布式数据 ->
+4. 构建模型 -> 5. FSDP 包装 -> 6. flow matching 训练循环。
 
-当前模型默认用 DummyPi05 冒烟（Pi05.predict_velocity 尚未实现），配置
-`training.use_dummy_model` 置 false 后切回真实 Pi05。
+当前模型默认用 DummyPi05 冒烟；配置 `training.use_dummy_model=false` 后
+切回真实 Pi05。
 """
 
 from __future__ import annotations
 
 import argparse
+import random
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import torch
 from loguru import logger
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 
 from neat_pi.config import Config, load_config
 from neat_pi.data.transforms import images_to_float
 from neat_pi.device import backend
 from neat_pi.training.checkpoint import save_checkpoint
+from neat_pi.training.data import build_train_loader
 from neat_pi.training.dummy_model import DummyPi05
-from neat_pi.training.fsdp import wrap_model_fsdp
+from neat_pi.training.fsdp import clip_grad_norm, wrap_model_fsdp
 
 
 class TrainBatch(NamedTuple):
@@ -46,110 +48,211 @@ def prepare_batch(cfg: Config, batch: dict[str, Any],
                   device: torch.device) -> TrainBatch:
     """把 preprocessor 输出的 batch 整理成模型输入。
 
-    action (B,H,10) 补零到 config 的 action_dim（真实模型侧输入投影维度，
-    padding 由这里统一负责）；语言 attention mask 透传给模型构造 prefix mask。
+    action 维度不足 `model.action_dim` 时在右侧补零；语言 attention mask
+    原样传给 Pi05 构造 prefix mask。
     """
-    images = [batch[k].to(device) for k in sorted(batch)
-              if k.startswith("observation.images.")]
-    # 数据集侧还没有统一的相机缺失标记；训练 batch 先默认所有相机有效。
-    image_masks = [torch.ones(image.shape[0], dtype=torch.bool,
-                              device=device) for image in images]
+    images = [batch[key].to(device) for key in sorted(batch)
+              if key.startswith("observation.images.")]
+    image_masks = [
+        torch.ones(image.shape[0], dtype=torch.bool, device=device)
+        for image in images
+    ]
     token_ids = batch["observation.language.tokens"].to(device).long()
     lang_mask = batch["observation.language.attention_mask"].to(device).bool()
     actions = batch["action"].to(device).float()
     is_pad = batch.get("action_is_pad")
-    is_pad = (torch.zeros_like(actions[..., 0]).bool()
-              if is_pad is None else is_pad.to(device).bool())
-
+    is_pad = (
+        torch.zeros_like(actions[..., 0]).bool()
+        if is_pad is None
+        else is_pad.to(device).bool()
+    )
     real_action_dim = actions.shape[-1]
-    actions = F.pad(actions, (0, cfg.model.action_dim - actions.shape[-1]))
-    return TrainBatch(images, image_masks, token_ids, lang_mask, actions,
-                      is_pad, real_action_dim)
+    actions = F.pad(
+        actions,
+        (0, cfg.model.action_dim - actions.shape[-1]),
+    )
+    return TrainBatch(
+        images,
+        image_masks,
+        token_ids,
+        lang_mask,
+        actions,
+        is_pad,
+        real_action_dim,
+    )
 
 
 def build_model(cfg: Config, ctx: backend.DeviceContext,
                 amp_dtype: torch.dtype) -> torch.nn.Module:
-    """按配置构建模型：dummy 冒烟 / 加载 pretrained / 随机初始化。
-
-    ctx 与 amp_dtype 存进模型，forward 内部据此开混合精度并计算损失。
-    """
+    """按配置构建 dummy 冒烟模型或真实 Pi05，并注入设备上下文。"""
     if cfg.training.use_dummy_model:
-        logger.info("使用 DummyPi05 冒烟训练（Pi05.predict_velocity 尚未实现）")
         model = DummyPi05(cfg.model)
     else:
         from neat_pi.model.pi05 import Pi05
 
         if cfg.training.pretrained:
-            model = Pi05.from_pretrained(cfg.training.pretrained, cfg.model,
-                                         ctx.device)
+            model = Pi05.from_pretrained(
+                cfg.training.pretrained,
+                cfg.model,
+                ctx.device,
+            )
         else:
             model = Pi05(cfg.model)
+
+    if ctx.is_main_process:
+        model_name = "DummyPi05" if cfg.training.use_dummy_model else "Pi05"
+        logger.info("构建模型: {}", model_name)
     model.ctx = ctx
     model.amp_dtype = amp_dtype
     return model.to(ctx.device)
 
 
-def run_training(config_path: str) -> None:
-    """训练主流程。"""
-    cfg = load_config(config_path)
-
-    # 1. 设备与分布式：torchrun 下读 RANK/LOCAL_RANK/WORLD_SIZE，单进程退化为单卡
-    ctx = backend.init_device(cfg.device.type)
-    amp_dtype = backend.get_amp_dtype(cfg.device.dtype)
-    logger.info("设备: {} {} | rank {}/{} | amp {}",
-                ctx.type.value, ctx.device, ctx.rank, ctx.world_size, amp_dtype)
-
-    # 2. 数据：LeRobotDataset + DataLoader 默认 collate + preprocessor 管线
-    from neat_pi.data.lerobot_dataset import build_dataset
-    from neat_pi.data.preprocessor import load_preprocessor
-
-    ds = build_dataset(cfg.data, cfg.model)
-    loader = DataLoader(
-        ds,
-        batch_size=cfg.data.batch_size,
-        num_workers=cfg.data.num_workers,
-        shuffle=True,
-    )
-    preprocessor = load_preprocessor(cfg)
-    logger.info("数据集: {} 帧, batch {} x {} workers",
-                len(ds), cfg.data.batch_size, cfg.data.num_workers)
-
-    # 3. 模型 + FSDP（单卡时原样返回）
-    model = build_model(cfg, ctx, amp_dtype)
-    model = wrap_model_fsdp(model, cfg.training.fsdp, ctx, amp_dtype)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr,
-                                  weight_decay=cfg.training.weight_decay)
-
-    # 4. 训练循环（checkpoint 仅主进程写盘）
+def train(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    sampler: DistributedSampler,
+    optimizer: torch.optim.Optimizer,
+    preprocessor: Callable[[dict[str, Any]], dict[str, Any]],
+    cfg: Config,
+    ctx: backend.DeviceContext,
+) -> None:
+    """执行 flow matching 训练循环；step 计数按 optimizer step 计算。"""
+    accumulation_steps = cfg.training.grad_accum_steps
+    max_steps = cfg.training.max_steps
     model.train()
+    optimizer.zero_grad(set_to_none=True)
     data_iter = iter(loader)
-    logger.info("开始训练 {} 步", cfg.training.max_steps)
-    for step in range(cfg.training.max_steps):
+    epoch = 0
+    optimizer_step = 0
+    micro_step = 0
+    accumulation_losses: list[torch.Tensor] = []
+    if ctx.is_main_process:
+        logger.info(
+            "开始训练 {} 步 | 梯度累计 {}",
+            max_steps,
+            accumulation_steps,
+        )
+
+    while optimizer_step < max_steps:
         try:
             batch = next(data_iter)
         except StopIteration:
+            epoch += 1
+            sampler.set_epoch(epoch)
             data_iter = iter(loader)
-            batch = next(data_iter)
+            continue
 
-        tb = prepare_batch(cfg, preprocessor(images_to_float(batch)), ctx.device)
-        loss = model(tb.images, tb.image_masks, tb.token_ids, tb.lang_mask,
-                     tb.actions, tb.is_pad, tb.real_action_dim)
+        tb = prepare_batch(
+            cfg,
+            preprocessor(images_to_float(batch)),
+            ctx.device,
+        )
+        loss = model(
+            tb.images,
+            tb.image_masks,
+            tb.token_ids,
+            tb.lang_mask,
+            tb.actions,
+            tb.is_pad,
+            tb.real_action_dim,
+        )
+        (loss / accumulation_steps).backward()
+        accumulation_losses.append(loss.detach())
+        micro_step += 1
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        if micro_step % accumulation_steps != 0:
+            continue
+
+        if cfg.training.gradient_clip_norm is not None:
+            clip_grad_norm(model, cfg.training.gradient_clip_norm)
         optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        optimizer_step += 1
 
-        if step % cfg.training.log_every == 0:
-            logger.info("step {}/{} | loss {:.4f}",
-                        step, cfg.training.max_steps, loss.item())
-        if step % cfg.training.save_every == 0:
-            save_checkpoint(model, optimizer, step, cfg.training.output_dir, ctx)
+        if ctx.is_main_process and optimizer_step % cfg.training.log_every == 0:
+            mean_loss = torch.stack(accumulation_losses).mean().item()
+            logger.info(
+                "step {}/{} | loss {:.4f} | micro steps {}",
+                optimizer_step,
+                max_steps,
+                mean_loss,
+                micro_step,
+            )
+        if optimizer_step % cfg.training.save_every == 0:
+            save_checkpoint(
+                model,
+                optimizer,
+                optimizer_step,
+                cfg.training.output_dir,
+                ctx,
+            )
+        accumulation_losses.clear()
 
-    backend.cleanup_distributed()
+
+def run_training(config_path: str) -> None:
+    """训练主流程；所有 rank 在退出时清理分布式进程组。"""
+    cfg = load_config(config_path)
+    ctx = backend.init_device(cfg.device.type)
+    amp_dtype = backend.get_amp_dtype(cfg.device.dtype)
+    try:
+        if ctx.is_main_process:
+            logger.info(
+                "设备: {} {} | rank {}/{} | world size {} | amp {}",
+                ctx.type.value,
+                ctx.device,
+                ctx.rank,
+                ctx.world_size,
+                amp_dtype,
+            )
+
+        random.seed(cfg.training.seed)
+        torch.manual_seed(cfg.training.seed)
+
+        from neat_pi.data.lerobot_dataset import build_dataset
+        from neat_pi.data.preprocessor import load_preprocessor
+
+        dataset = build_dataset(cfg.data, cfg.model)
+        loader, sampler = build_train_loader(dataset, cfg, ctx)
+        if len(loader) == 0:
+            raise ValueError(
+                "数据集在当前 rank/batch_size 下没有可用训练 batch")
+        if ctx.is_main_process:
+            logger.info(
+                "数据集: {} 帧 | rank batch {} | rank batches {}",
+                len(dataset),
+                cfg.data.batch_size,
+                len(loader),
+            )
+
+        preprocessor = load_preprocessor(cfg)
+        model = build_model(cfg, ctx, amp_dtype)
+        model = wrap_model_fsdp(
+            model,
+            cfg.training.fsdp,
+            ctx,
+            amp_dtype,
+        )
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=cfg.training.lr,
+            weight_decay=cfg.training.weight_decay,
+        )
+
+        train(
+            model=model,
+            loader=loader,
+            sampler=sampler,
+            optimizer=optimizer,
+            preprocessor=preprocessor,
+            cfg=cfg,
+            ctx=ctx,
+        )
+    finally:
+        backend.cleanup_distributed()
 
 
 def parse_args() -> argparse.Namespace:
-    """解析命令行参数（只有 --config）。"""
+    """解析命令行参数；只有 --config。"""
     parser = argparse.ArgumentParser(description="neat-pi 训练入口")
     parser.add_argument("--config", required=True, help="YAML 配置路径")
     return parser.parse_args()

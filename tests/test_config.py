@@ -38,6 +38,7 @@ def test_default_config_uses_planned_fsdp_contract() -> None:
     assert cfg.training.gradient_clip_norm == 1.0
     assert cfg.training.grad_accum_steps == 1
     assert cfg.training.resume is False
+    assert cfg.training.seed == 1000
 
 
 def test_load_config_accepts_existing_libero_training_config() -> None:
@@ -107,6 +108,7 @@ def test_forward_prefetch_conflicts_with_activation_checkpointing() -> None:
     ("gradient_clip_norm", 0),
     ("use_dummy_model", 1),
     ("resume", "false"),
+    ("seed", -1),
     ("output_dir", ""),
 ])
 def test_invalid_training_value_is_rejected(field: str, value: Any) -> None:

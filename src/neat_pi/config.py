@@ -131,6 +131,7 @@ class TrainingConfig:
     gradient_clip_norm: float | None = 1.0
     grad_accum_steps: int = 1
     resume: bool = False
+    seed: int = 1000
     fsdp: FSDPConfig = field(default_factory=FSDPConfig)
 
     def validate(self) -> None:
@@ -158,6 +159,8 @@ class TrainingConfig:
                             ("resume", self.resume)):
             if type(value) is not bool:
                 raise ValueError(f"training.{name} 必须是布尔值，实际为 {value!r}")
+        if type(self.seed) is not int or self.seed < 0:
+            raise ValueError(f"training.seed 必须是非负整数，实际为 {self.seed!r}")
         if not isinstance(self.pretrained, (str, type(None))):
             raise ValueError(
                 f"training.pretrained 必须是路径字符串或 null，实际为 {self.pretrained!r}")
