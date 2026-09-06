@@ -184,6 +184,55 @@ def test_predict_velocity_matches_prefill_cache_path(
     assert torch.isfinite(velocity).all()
 
 
+def test_sample_actions_reproduces_single_euler_step(
+        generator: torch.Generator) -> None:
+    """num_steps=1 时采样结果必须等于 x1 - v(x1, t=1) 的 Euler 更新。"""
+    model = Pi05(_small_model_config())
+    images = [torch.randn(2, 3, 16, 16, generator=generator),
+              torch.zeros(2, 3, 16, 16)]
+    image_masks = [torch.ones(2, dtype=torch.bool),
+                   torch.zeros(2, dtype=torch.bool)]
+    token_ids = torch.randint(0, 64, (2, 6), generator=generator)
+    lang_mask = torch.tensor([[True] * 4 + [False] * 2,
+                              [True] * 6], dtype=torch.bool)
+
+    torch.manual_seed(1234)
+    sampled = model.sample_actions(images, image_masks, token_ids,
+                                   lang_mask, num_steps=1)
+    torch.manual_seed(1234)
+    x1 = torch.randn(2, 3, 7)
+    t1 = torch.ones(2)
+    velocity = model.predict_velocity(images, image_masks, token_ids,
+                                      lang_mask, x1, t1)
+
+    torch.testing.assert_close(sampled, x1 - velocity,
+                               atol=1e-5, rtol=1e-5)
+    assert sampled.shape == (2, 3, 7)
+    assert torch.isfinite(sampled).all()
+
+
+def test_sample_actions_is_reproducible_and_rejects_invalid_steps(
+        generator: torch.Generator) -> None:
+    """固定随机源时采样可复现；num_steps 必须为正。"""
+    model = Pi05(_small_model_config())
+    images = [torch.randn(2, 3, 16, 16, generator=generator)]
+    image_masks = [torch.ones(2, dtype=torch.bool)]
+    token_ids = torch.randint(0, 64, (2, 5), generator=generator)
+    lang_mask = torch.ones(2, 5, dtype=torch.bool)
+
+    torch.manual_seed(5678)
+    first = model.sample_actions(images, image_masks, token_ids, lang_mask,
+                                 num_steps=2)
+    torch.manual_seed(5678)
+    second = model.sample_actions(images, image_masks, token_ids, lang_mask,
+                                  num_steps=2)
+    torch.testing.assert_close(first, second)
+
+    with pytest.raises(ValueError, match="num_steps"):
+        model.sample_actions(images, image_masks, token_ids, lang_mask,
+                             num_steps=0)
+
+
 def test_flow_matching_loss_backward_reaches_all_components(
         generator: torch.Generator) -> None:
     """真实 Pi05 在小配置下可计算 loss，并反传到 VLM 和 action 专家。"""

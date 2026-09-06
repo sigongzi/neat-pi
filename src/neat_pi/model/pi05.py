@@ -14,6 +14,7 @@ import torch
 from torch import nn
 
 from neat_pi.config import ModelConfig
+from neat_pi.device.backend import autocast
 from neat_pi.model.action_expert import ActionExpert
 from neat_pi.model.flow_matching import FlowMatchingModel
 from neat_pi.model.gemma import GemmaLM
@@ -220,7 +221,45 @@ class Pi05(FlowMatchingModel):
                        lang_mask: MaskBL, num_steps: int = 10) -> ActionBHD:
         """推理：从噪声出发用 Euler 法积分 flow ODE，返回动作 chunk。
 
-        TODO: 按 pi05 推理路径实现（x_1 ~ N(0,I) 置于 t=1 纯噪声端，
-        t 从 1 到 0 以 dt = -1/num_steps 积分，约定见 flow_matching.py）。
+        prefix embedding 与 VLM 侧的每层 k/v 只计算一次；所有去噪步
+        复用 PrefixKVCache，只重算 action expert。flow 约定与训练一致：
+        t=1 是纯噪声端，t=0 是数据端。
         """
-        raise NotImplementedError("待实现：flow matching 采样")
+        if num_steps <= 0:
+            raise ValueError(f"num_steps 必须大于 0，实际为 {num_steps}")
+
+        batch_size = token_ids.shape[0]
+        device = token_ids.device
+        # ODE 状态和输出保持 float32，避免低精度累进误差；模型计算由
+        # 与训练相同的 autocast 配置控制。
+        noisy_action = torch.randn(
+            batch_size, self.cfg.action_horizon, self.cfg.action_dim,
+            device=device, dtype=torch.float32)
+        delta_time = -1.0 / num_steps
+
+        with autocast(self.ctx, self.amp_dtype):
+            prefix_embeds, prefix_pad_mask = self.embed_prefix(
+                images, image_masks, token_ids, lang_mask)
+            joint_mask = self._joint_attention_mask(
+                prefix_pad_mask, self.cfg.action_horizon)
+            prefix_len = prefix_embeds.shape[1]
+            prefix_kvs = self.language_model.prefill(
+                prefix_embeds, joint_mask[:, :, :prefix_len, :prefix_len])
+            action_attention_mask = joint_mask[:, :, prefix_len:, :]
+
+            action = noisy_action
+            for step in range(num_steps):
+                time = 1.0 + step * delta_time
+                time_tensor = torch.full(
+                    (batch_size,), time, device=device, dtype=torch.float32)
+                action_tokens, adarms_cond = self.embed_suffix(
+                    action, time_tensor)
+                action_hidden = self.action_expert.run_layers(
+                    action_tokens, adarms_cond, prefix_kvs,
+                    action_attention_mask)
+                action_hidden, _ = self.action_expert.norm(
+                    action_hidden, adarms_cond)
+                velocity = self.action_expert.decode_velocity(action_hidden)
+                action = action + delta_time * velocity.float()
+
+        return action
