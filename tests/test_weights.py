@@ -101,8 +101,19 @@ def test_translate_name_skips_expert_language_head() -> None:
 
 
 def test_fused_layer_internal_and_canonical_names_round_trip() -> None:
-    """MoT internal layer 名与 canonical checkpoint 名一一对应。"""
+    """MoT internal layer 名与 canonical checkpoint 名一一对应。
+
+    internal 路径含 fused_layer 一层（MoT.layers 常驻
+    MoTFusedCheckpointAdapter）；canonical_to_internal_name 产出新路径，
+    internal_to_canonical_name 同时兼容新旧两种 internal 路径。
+    """
     internal_names = [
+        "mot.layers.0.fused_layer.vlm.self_attn.q_proj.weight",
+        "mot.layers.0.fused_layer.action.self_attn.q_proj.weight",
+        "mot.layers.17.fused_layer.vlm.mlp.down_proj.weight",
+        "mot.layers.17.fused_layer.action.mlp.down_proj.weight",
+    ]
+    legacy_internal_names = [
         "mot.layers.0.vlm.self_attn.q_proj.weight",
         "mot.layers.0.action.self_attn.q_proj.weight",
         "mot.layers.17.vlm.mlp.down_proj.weight",
@@ -114,8 +125,11 @@ def test_fused_layer_internal_and_canonical_names_round_trip() -> None:
         "language_model.layers.17.mlp.down_proj.weight",
         "action_expert.layers.17.mlp.down_proj.weight",
     ]
-    for internal, canonical in zip(internal_names, canonical_names, strict=True):
+    for internal, legacy, canonical in zip(
+            internal_names, legacy_internal_names, canonical_names,
+            strict=True):
         assert internal_to_canonical_name(internal) == canonical
+        assert internal_to_canonical_name(legacy) == canonical
         assert canonical_to_internal_name(canonical) == internal
 
 
@@ -125,11 +139,12 @@ def test_small_pi05_canonical_state_dict_hides_fused_paths() -> None:
     internal_names = set(model.state_dict())
     canonical_state = canonical_pi05_state_dict(model)
 
-    assert internal_to_canonical_name("mot.layers.0.vlm.mlp.down_proj.weight") == \
+    assert internal_to_canonical_name(
+        "mot.layers.0.fused_layer.vlm.mlp.down_proj.weight") == \
         "language_model.layers.0.mlp.down_proj.weight"
     assert canonical_to_internal_name(
         "action_expert.layers.0.self_attn.q_proj.weight") == \
-        "mot.layers.0.action.self_attn.q_proj.weight"
+        "mot.layers.0.fused_layer.action.self_attn.q_proj.weight"
     assert all(not name.startswith("mot.") for name in canonical_state)
     assert canonical_state.keys() == {
         internal_to_canonical_name(name) for name in internal_names

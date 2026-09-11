@@ -51,8 +51,15 @@ class ExpertLayerView:
         return len(self._stack.layers)
 
     def __getitem__(self, index: int) -> nn.Module:
-        """按层号返回该 Expert 的 block。"""
+        """按层号返回该 Expert 的 block。
+
+        MoT.layers 常驻 MoTFusedCheckpointAdapter，穿透 fused_layer 取
+        block（duck typing，避免 expert.py 反向依赖 mot.py 造成循环导入）。
+        """
         layer = self._stack.layers[index]
+        fused = getattr(layer, "fused_layer", None)
+        if fused is not None:
+            layer = fused
         return cast(nn.Module, getattr(layer, self._expert_name))
 
     def __iter__(self) -> Iterator[nn.Module]:

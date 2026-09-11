@@ -13,7 +13,7 @@ from torch.distributed.fsdp import BackwardPrefetch, ShardingStrategy
 
 from neat_pi.config import FSDPConfig, ModelConfig
 from neat_pi.device.backend import DeviceContext, DeviceType
-from neat_pi.model.mot import MoTFusedLayer
+from neat_pi.model.mot import MoTFusedCheckpointAdapter, MoTFusedLayer
 from neat_pi.model.pi05 import Pi05
 from neat_pi.model.siglip import SiglipEncoderLayer
 from neat_pi.training.fsdp import (
@@ -68,10 +68,18 @@ def _cpu_context(world_size: int = 1) -> DeviceContext:
 
 
 def test_auto_wrap_and_checkpoint_units_match_fsdp_plan() -> None:
-    """FSDP 和 activation checkpointing 的目标 layer 保持一致。"""
-    expected = (MoTFusedLayer, SiglipEncoderLayer)
-    assert fsdp_auto_wrap_classes() == expected
-    assert fsdp_activation_checkpoint_classes() == expected
+    """FSDP unit 是 fused layer；checkpoint 边界是张量签名的 adapter。
+
+    MoTFusedLayer 的 dict 签名不能穿过 checkpoint 边界（未定义行为，
+    见 docs/plan/09），因此 checkpoint 直接包
+    MoTFusedCheckpointAdapter，FSDP auto-wrap 仍以内部的 MoTFusedLayer
+    为 unit（adapter 无自有参数，分片粒度不变）。
+    """
+    assert fsdp_auto_wrap_classes() == (MoTFusedLayer, SiglipEncoderLayer)
+    assert fsdp_activation_checkpoint_classes() == (
+        MoTFusedCheckpointAdapter,
+        SiglipEncoderLayer,
+    )
 
 
 def test_strategy_and_prefetch_strings_map_to_torch_enums() -> None:
@@ -136,7 +144,7 @@ def test_distributed_fsdp_rejects_cpu_device() -> None:
 
 
 def test_activation_checkpointing_wraps_expected_layers() -> None:
-    """non-reentrant checkpoint wrapper 只作用于计划中的 layer 单元。"""
+    """non-reentrant checkpoint wrapper 只作用于张量签名的边界单元。"""
     cfg = _small_model_config()
     model = Pi05(cfg)
     expected_count = cfg.vision_num_layers + cfg.expert_num_layers
@@ -154,6 +162,17 @@ def test_activation_checkpointing_wraps_expected_layers() -> None:
 
     assert len(wrappers) == expected_count
     assert all(
-        isinstance(module, (MoTFusedLayer, SiglipEncoderLayer))
+        isinstance(module, (MoTFusedCheckpointAdapter, SiglipEncoderLayer))
         for module in wrapped_modules
+    )
+    # MoT 侧被 checkpoint 的是 adapter，其内部的 fused layer 保持
+    # MoTFusedLayer——dict 不穿越 checkpoint 边界，FSDP unit 粒度不变。
+    adapters = [
+        module for module in wrapped_modules
+        if isinstance(module, MoTFusedCheckpointAdapter)
+    ]
+    assert len(adapters) == cfg.expert_num_layers
+    assert all(
+        isinstance(adapter.fused_layer, MoTFusedLayer)
+        for adapter in adapters
     )

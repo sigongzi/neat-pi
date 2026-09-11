@@ -8,6 +8,12 @@ Pi05 的 VLM prefix 与动作段在每个 transformer 层共享同一次 attenti
 block，并把一次共享 attention 收敛在自己的 forward 中。``MoT`` 只按序调用
 这些 fused layer，从而使 FSDP 可以按 layer 粒度干净分片。
 
+``MoT.layers`` 常驻 ``MoTFusedCheckpointAdapter``：activation
+checkpointing 的边界契约只接受 Tensor 输入与 tuple[Tensor] 输出，
+fused layer 的 dict 签名不能穿过 checkpoint 边界（未定义行为，实测
+显存泄漏，见 docs/plan/09）。adapter 无自有参数，FSDP auto-wrap 仍以
+内部的 ``MoTFusedLayer`` 为 unit，分片粒度不变。
+
 Expert block 的半块接口与语义：
 
 - ``pre_attn(x, cos, sin, cond=None) -> (q, k, v, state)``
@@ -99,6 +105,50 @@ class MoTFusedLayer(nn.Module):
         return tokens
 
 
+class MoTFusedCheckpointAdapter(nn.Module):
+    """把 MoTFusedLayer 的 dict 签名展平成 checkpoint 安全的张量签名。
+
+    activation checkpointing 的边界契约只接受 Tensor（与不可变标量/None）
+    输入、tuple[Tensor] 输出；MoTFusedLayer 的 dict 参数携带激活图，穿过
+    checkpoint 边界是未定义行为（实测 ~50MiB/步 显存泄漏，复现数据见
+    docs/plan/09 §5）。Adapter 常驻在 MoT.layers 中：dict 的打包/解包
+    全部发生在边界内。
+
+    展平顺序是唯一约定，MoT.forward 必须按它组装参数：
+    ``vlm_tokens, action_tokens, vlm_cos, vlm_sin, action_cos, action_sin,
+    attention_mask, vlm_cond, action_cond``。
+    """
+
+    def __init__(self, fused_layer: MoTFusedLayer) -> None:
+        super().__init__()
+        if fused_layer.expert_names != ("vlm", "action"):
+            raise ValueError(
+                "MoTFusedCheckpointAdapter 固定 vlm/action 两路签名，"
+                f"实际 expert_names: {fused_layer.expert_names}")
+        self.fused_layer = fused_layer
+
+    def forward(
+        self,
+        vlm_tokens: LanguageTokensBTD,
+        action_tokens: ActionTokensBHD,
+        vlm_cos: torch.Tensor,
+        vlm_sin: torch.Tensor,
+        action_cos: torch.Tensor,
+        action_sin: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        vlm_cond: CondBD | None,
+        action_cond: CondBD | None,
+    ) -> tuple[LanguageTokensBTD, ActionTokensBHD]:
+        """张量进、张量出；dict 的组装只发生在 adapter 内部。"""
+        out = self.fused_layer(
+            {"vlm": vlm_tokens, "action": action_tokens},
+            {"vlm": (vlm_cos, vlm_sin), "action": (action_cos, action_sin)},
+            attention_mask,
+            {"vlm": vlm_cond, "action": action_cond},
+        )
+        return tuple(out[name] for name in self.fused_layer.expert_names)
+
+
 class MoT(nn.Module):
     """把多个 Expert 组合成由 `MoTFusedLayer` 构成的共享注意力堆叠。"""
 
@@ -125,15 +175,17 @@ class MoT(nn.Module):
         num_layers = next(iter(layer_counts.values()))
         first = mixtures[self._expert_name[0]]
         self.layers = nn.ModuleList([
-            MoTFusedLayer(
-                {
-                    name: owned_layers[name][layer_idx]
-                    for name in self._expert_name
-                },
-                first.num_heads,
-                first.num_kv_heads,
-                first.attn_head_dim,
-                first.theta,
+            MoTFusedCheckpointAdapter(
+                MoTFusedLayer(
+                    {
+                        name: owned_layers[name][layer_idx]
+                        for name in self._expert_name
+                    },
+                    first.num_heads,
+                    first.num_kv_heads,
+                    first.attn_head_dim,
+                    first.theta,
+                )
             )
             for layer_idx in range(num_layers)
         ])
@@ -197,8 +249,21 @@ class MoT(nn.Module):
         }
         conds = conds or {}
         tokens = dict(embeds_dict)
+        expert_names = self._expert_name
         for layer in self.layers:
-            tokens = layer(tokens, rope, attention_mask, conds)
+            # 展平顺序与 MoTFusedCheckpointAdapter.forward 签名一一对应
+            flat: list[torch.Tensor | None] = [
+                tokens[name] for name in expert_names]
+            for name in expert_names:
+                flat += [rope[name][0], rope[name][1]]
+            flat.append(attention_mask)
+            for name in expert_names:
+                flat.append(conds.get(name))
+            outs = layer(*flat)
+            tokens = {
+                name: out
+                for name, out in zip(expert_names, outs, strict=True)
+            }
         return tokens
 
     def extra_repr(self) -> str:

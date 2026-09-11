@@ -87,9 +87,9 @@ def _dead_grad_prefixes(num_layers: int) -> tuple[str, ...]:
     last = num_layers - 1
     return (
         "language_model.norm.",
-        f"mot.layers.{last}.vlm.self_attn.o_proj.",
-        f"mot.layers.{last}.vlm.post_attention_layernorm.",
-        f"mot.layers.{last}.vlm.mlp.",
+        f"mot.layers.{last}.fused_layer.vlm.self_attn.o_proj.",
+        f"mot.layers.{last}.fused_layer.vlm.post_attention_layernorm.",
+        f"mot.layers.{last}.fused_layer.vlm.mlp.",
     )
 
 
@@ -183,8 +183,8 @@ def test_backward_reaches_every_module_and_shared_attention() -> None:
         model.action_expert.norm.dense.weight,
     ]
     for layer_idx in range(_grad_flow_config().vlm_num_layers):
-        vlm = model.mot.layers[layer_idx].vlm
-        action = model.mot.layers[layer_idx].action
+        vlm = model.mot.layers[layer_idx].fused_layer.vlm
+        action = model.mot.layers[layer_idx].fused_layer.action
         critical += [
             vlm.self_attn.k_proj.weight,
             vlm.self_attn.v_proj.weight,
@@ -212,7 +212,7 @@ def test_backward_reaches_every_module_and_shared_attention() -> None:
     # 非末层 vlm 的 q 经"本层输出流 -> 下一层 K/V"拿到微小但非零的梯度，
     # 属于活路径，不在此断言。
     _assert_zero_grad("last vlm.q_proj",
-                      model.mot.layers[-1].vlm.self_attn.q_proj.weight)
+                      model.mot.layers[-1].fused_layer.vlm.self_attn.q_proj.weight)
 
 
 def test_training_unlocks_adaln_and_reduces_loss() -> None:
@@ -233,11 +233,11 @@ def test_training_unlocks_adaln_and_reduces_loss() -> None:
          model.vision_tower.embeddings.patch_embedding.weight,
          model.vision_tower.embeddings.patch_embedding.weight.detach().clone()),
         ("vlm.k_proj",
-         model.mot.layers[0].vlm.self_attn.k_proj.weight,
-         model.mot.layers[0].vlm.self_attn.k_proj.weight.detach().clone()),
+         model.mot.layers[0].fused_layer.vlm.self_attn.k_proj.weight,
+         model.mot.layers[0].fused_layer.vlm.self_attn.k_proj.weight.detach().clone()),
         ("action.q_proj",
-         model.mot.layers[0].action.self_attn.q_proj.weight,
-         model.mot.layers[0].action.self_attn.q_proj.weight.detach().clone()),
+         model.mot.layers[0].fused_layer.action.self_attn.q_proj.weight,
+         model.mot.layers[0].fused_layer.action.self_attn.q_proj.weight.detach().clone()),
     ]
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
 
@@ -256,11 +256,11 @@ def test_training_unlocks_adaln_and_reduces_loss() -> None:
             _assert_nonzero_grad("vision.patch_embedding",
                                  model.vision_tower.embeddings.patch_embedding.weight)
             _assert_nonzero_grad("vlm.k_proj",
-                                 model.mot.layers[0].vlm.self_attn.k_proj.weight)
+                                 model.mot.layers[0].fused_layer.vlm.self_attn.k_proj.weight)
             _assert_nonzero_grad("action.q_proj",
-                                 model.mot.layers[0].action.self_attn.q_proj.weight)
+                                 model.mot.layers[0].fused_layer.action.self_attn.q_proj.weight)
             _assert_nonzero_grad("vlm gate dense",
-                                 model.mot.layers[0].action.input_layernorm.dense.weight)
+                                 model.mot.layers[0].fused_layer.action.input_layernorm.dense.weight)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 

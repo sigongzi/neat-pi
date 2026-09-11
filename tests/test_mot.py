@@ -19,7 +19,8 @@ from torch import nn
 from neat_pi.model.action_expert import ActionExpert
 from neat_pi.model.gemma import GemmaLM
 from neat_pi.model.util import build_rope_cache
-from neat_pi.model.mot import MoT, MoTFusedLayer
+from neat_pi.model.mot import (MoT, MoTFusedCheckpointAdapter,
+                               MoTFusedLayer)
 
 
 def _small_vlm() -> GemmaLM:
@@ -115,15 +116,55 @@ def test_mot_takes_ownership_using_fused_layers() -> None:
     mot = MoT({"vlm": vlm, "action": expert})
 
     assert len(mot.layers) == 2
-    assert all(isinstance(layer, MoTFusedLayer) for layer in mot.layers)
-    assert mot.layers[0].vlm is vlm.layers[0]
-    assert mot.layers[0].action is expert.layers[0]
+    assert all(
+        isinstance(layer, MoTFusedCheckpointAdapter) for layer in mot.layers)
+    assert isinstance(mot.layers[0].fused_layer, MoTFusedLayer)
+    assert mot.layers[0].fused_layer.vlm is vlm.layers[0]
+    assert mot.layers[0].fused_layer.action is expert.layers[0]
     assert not isinstance(vlm.layers, nn.ModuleList)
     assert not isinstance(expert.layers, nn.ModuleList)
     assert "layers" not in vlm._modules
     assert "layers" not in expert._modules
     with pytest.raises(RuntimeError, match="不拥有 layers"):
         vlm.take_owned_layers()
+
+
+def test_checkpoint_adapter_matches_fused_layer_dict_forward() -> None:
+    """adapter 的展平签名与 fused layer 的 dict 签名数值完全一致。
+
+    展平顺序是 MoTFusedCheckpointAdapter 的唯一约定，MoT.forward 与
+    checkpoint 边界都依赖它，这里逐张量对拍锁定。
+    """
+    torch.manual_seed(3)
+    mot = MoT({"vlm": _small_vlm(), "action": _small_expert()})
+    adapter = mot.layers[0]
+    fused = adapter.fused_layer
+
+    batch, prefix_len, action_len = 2, 7, 3
+    tokens = {
+        "vlm": torch.randn(batch, prefix_len, 64),
+        "action": torch.randn(batch, action_len, 64),
+    }
+    total = prefix_len + action_len
+    cos_full, sin_full = build_rope_cache(
+        total, fused.attn_head_dim, fused.theta,
+        tokens["vlm"].device, tokens["vlm"].dtype)
+    rope = {
+        "vlm": (cos_full[:prefix_len], sin_full[:prefix_len]),
+        "action": (cos_full[prefix_len:], sin_full[prefix_len:]),
+    }
+    mask = _pi05_mask(prefix_len, action_len)[None, None]
+    conds = {"vlm": None, "action": torch.randn(batch, 64)}
+
+    expected = fused(dict(tokens), rope, mask, conds)
+    actual = adapter(
+        tokens["vlm"], tokens["action"],
+        *rope["vlm"], *rope["action"],
+        mask, conds["vlm"], conds["action"],
+    )
+
+    torch.testing.assert_close(actual[0], expected["vlm"])
+    torch.testing.assert_close(actual[1], expected["action"])
 
 
 def test_mot_parameter_paths_are_unique_after_fused_ownership() -> None:

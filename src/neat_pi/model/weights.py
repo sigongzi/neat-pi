@@ -37,7 +37,7 @@ from neat_pi.device.backend import DeviceContext
 
 _LOCAL_CHECKPOINT_FORMAT = "neat-pi.pi05-local-v1"
 _FUSED_INTERNAL_RE = re.compile(
-    r"^mot\.layers\.(\d+)\.(vlm|action)\.(.+)$")
+    r"^mot\.layers\.(\d+)\.(?:fused_layer\.)?(vlm|action)\.(.+)$")
 _FUSED_CANONICAL_RE = re.compile(
     r"^(language_model|action_expert)\.layers\.(\d+)\.(.+)$")
 _FUSED_EXPERT_TO_CANONICAL = {"vlm": "language_model", "action": "action_expert"}
@@ -175,13 +175,18 @@ def internal_to_canonical_name(name: str) -> str:
 
 
 def canonical_to_internal_name(name: str) -> str:
-    """把 canonical Pi05 state_dict 名映射到 internal fused-layer 名。"""
+    """把 canonical Pi05 state_dict 名映射到 internal fused-layer 名。
+
+    MoT.layers 常驻 MoTFusedCheckpointAdapter，internal 路径含
+    ``fused_layer.`` 一层；``internal_to_canonical_name`` 同时兼容新旧
+    两种 internal 路径（旧名只出现在历史内存态，不落盘）。
+    """
     match = _FUSED_CANONICAL_RE.fullmatch(name)
     if not match:
         return name
     canonical_expert, layer_index, suffix = match.groups()
     expert_name = _FUSED_CANONICAL_TO_EXPERT[canonical_expert]
-    return f"mot.layers.{layer_index}.{expert_name}.{suffix}"
+    return f"mot.layers.{layer_index}.fused_layer.{expert_name}.{suffix}"
 
 
 def canonical_pi05_state_dict(model: nn.Module) -> dict[str, Tensor]:

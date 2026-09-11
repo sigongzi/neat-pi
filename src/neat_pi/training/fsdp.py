@@ -2,8 +2,13 @@
 
 `MoTFusedLayer` 是 VLM 与 action expert 配对后的一层所有权边界；
 `SiglipEncoderLayer` 是独立的视觉 transformer layer。二者都实现了完整
-forward，因此可以作为 FSDP auto-wrap 的最小稳定单元。activation
-checkpointing 先包这些 layer，FSDP 再包 checkpoint wrapper 内的目标层。
+forward，因此可以作为 FSDP auto-wrap 的最小稳定单元。
+
+activation checkpointing 的目标与 FSDP unit 不同：checkpoint 边界只
+接受 Tensor 输入与 tuple[Tensor] 输出，`MoTFusedLayer` 的 dict 签名
+不能穿过边界（未定义行为，实测 ~50MiB/步 显存泄漏，见 docs/plan/09
+§5）。因此 checkpoint 直接包 `MoTFusedCheckpointAdapter`（张量签名，
+dict 打包/解包在边界内），FSDP 再包 adapter 内部的 `MoTFusedLayer`。
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 
 from neat_pi.config import FSDPConfig
 from neat_pi.device.backend import DeviceContext, DeviceType
-from neat_pi.model.mot import MoTFusedLayer
+from neat_pi.model.mot import MoTFusedCheckpointAdapter, MoTFusedLayer
 from neat_pi.model.siglip import SiglipEncoderLayer
 
 _AUTO_WRAP_CLASSES: tuple[type[nn.Module], ...] = (
@@ -35,7 +40,7 @@ _AUTO_WRAP_CLASSES: tuple[type[nn.Module], ...] = (
     SiglipEncoderLayer,
 )
 _CHECKPOINT_CLASSES: tuple[type[nn.Module], ...] = (
-    MoTFusedLayer,
+    MoTFusedCheckpointAdapter,
     SiglipEncoderLayer,
 )
 
