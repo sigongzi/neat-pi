@@ -167,19 +167,25 @@ def train(
         if micro_step % accumulation_steps != 0:
             continue
 
+        # 保留 tensor，仅在打日志时才格式化（避免每步一次 GPU->CPU 同步）
+        grad_norm: torch.Tensor | None = None
         if cfg.training.gradient_clip_norm is not None:
-            clip_grad_norm(model, cfg.training.gradient_clip_norm)
+            grad_norm = clip_grad_norm(model, cfg.training.gradient_clip_norm)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         optimizer_step += 1
 
         if ctx.is_main_process and optimizer_step % cfg.training.log_every == 0:
             mean_loss = torch.stack(accumulation_losses).mean().item()
+            grad_norm_text = (
+                f" | grad_norm {grad_norm:.4f}"
+                if grad_norm is not None else "")
             logger.info(
-                "step {}/{} | loss {:.4f} | micro steps {}",
+                "step {}/{} | loss {:.4f}{} | micro steps {}",
                 optimizer_step,
                 max_steps,
                 mean_loss,
+                grad_norm_text,
                 micro_step,
             )
         if optimizer_step % cfg.training.save_every == 0:
@@ -206,7 +212,7 @@ def run_training(config_path: str) -> None:
     try:
         if ctx.is_main_process:
             logger.info(
-                "设备: {} {} | rank {}/{} | world size {} | amp {}",
+                "设备: {} {} | rank {} | world size {} | amp {}",
                 ctx.type.value,
                 ctx.device,
                 ctx.rank,

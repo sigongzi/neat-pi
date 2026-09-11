@@ -1,0 +1,60 @@
+# 计划 07 Step 3：tiny 结构的梯度回传冒烟配置（docs/plan/07-local-grad-flow-smoke.md）。
+# 结构超参缩小到 8GB 单卡可容纳，数据 / preprocessor / tokenizer / SE3 stats
+# 全部走与 pi05_libero.yaml 相同的真实管线；随机初始化（pretrained: null）。
+# 用途：单进程 `uv run python scripts/train.py --config configs/pi05_smoke.yaml`
+# 验证真实 Pi05 的 forward / backward / optimizer 链路；FSDP 分片正确性
+# 不在本配置目标内（单进程时 wrap_model_fsdp 自动跳过）。
+
+device:
+  type: cuda
+  dtype: bfloat16       # 与真实训练同路径（Ampere 支持 bf16）
+
+model:
+  # 尺寸约束（见计划 07 §2）：SigLIP hidden 须被 heads 整除；
+  # vocab 保持 257152——真实 Gemma tokenizer 的 id 覆盖全词表，缩小会 index error
+  image_size: 224
+  num_cameras: 2
+  action_horizon: 32    # 与 preprocessor JSON 的 SE3StateActionStep 一致
+  action_dim: 32
+  vision_hidden_dim: 128
+  vision_patch_size: 14
+  vision_num_layers: 2
+  vision_num_heads: 4
+  vision_mlp_hidden_dim: 512
+  vocab_size: 257152
+  vlm_hidden_dim: 256
+  vlm_num_layers: 2
+  vlm_num_heads: 4
+  vlm_num_kv_heads: 1
+  vlm_attn_head_dim: 64
+  vlm_mlp_hidden_dim: 1024
+  expert_hidden_dim: 256
+  expert_num_layers: 2
+  expert_num_heads: 4
+  expert_num_kv_heads: 1
+  expert_attn_head_dim: 64
+  expert_mlp_hidden_dim: 1024
+
+data:
+  repo_id: libero
+  root: /home/ivoryseagull/neat-pi-old/data/lerobot/libero
+  batch_size: 4
+  num_workers: 2
+  preprocessor_path: configs/pi05_libero_preprocessor.json
+  postprocessor_path: configs/pi05_libero_postprocessor.json
+  max_token_len: 200
+
+training:
+  use_dummy_model: false
+  pretrained: null      # 随机初始化
+  max_steps: 20
+  lr: 2.5e-5
+  weight_decay: 0.0
+  log_every: 1
+  save_every: 100       # 20 步不触发保存；checkpoint 路径由单测覆盖
+  output_dir: outputs/smoke_grad_flow
+  gradient_clip_norm: 1.0
+  grad_accum_steps: 1
+  fsdp:
+    sharding_strategy: no_shard   # 单进程本来就不 wrap，显式声明意图
+    activation_checkpointing: false
