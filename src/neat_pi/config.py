@@ -127,6 +127,8 @@ class TrainingConfig:
     weight_decay: float = 0.0
     log_every: int = 10
     save_every: int = 1000
+    keep_last_n: int = 0  # 按数量保留最近 n 个 checkpoint；0 = 不按数量保留
+    keep_every: int = 0   # step % keep_every == 0 的里程碑永久保留；0 = 禁用
     output_dir: str = "outputs/pi05_libero"
     gradient_clip_norm: float | None = 1.0
     grad_accum_steps: int = 1
@@ -145,6 +147,12 @@ class TrainingConfig:
                             ("save_every", self.save_every)):
             if type(value) is not int or value <= 0:
                 raise ValueError(f"training.{name} 必须是正整数，实际为 {value!r}")
+        # checkpoint 保留策略：0 是合法值（关闭对应保留维度），负数 / 非整数非法
+        for name, value in (("keep_last_n", self.keep_last_n),
+                            ("keep_every", self.keep_every)):
+            if type(value) is not int or value < 0:
+                raise ValueError(
+                    f"training.{name} 必须是非负整数，实际为 {value!r}")
         for name, value in (("lr", self.lr), ("weight_decay", self.weight_decay)):
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"training.{name} 必须是有限非负数，实际为 {value!r}")

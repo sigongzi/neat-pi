@@ -19,6 +19,7 @@ from neat_pi.training.checkpoint import (
     latest_checkpoint_path,
     load_checkpoint,
     load_checkpoint_metadata,
+    prune_checkpoints,
     save_checkpoint,
 )
 def _small_pi05(dtype: torch.dtype = torch.float32) -> Pi05:
@@ -139,3 +140,119 @@ def test_checkpoint_round_trip_uses_canonical_safetensors(
     ) == 7
     for name, tensor in model.state_dict().items():
         torch.testing.assert_close(restored.state_dict()[name], tensor)
+
+
+def _make_checkpoint_dir(root: Path, step: int,
+                         complete: bool = True) -> Path:
+    """构造一个 checkpoint 目录；complete=False 时缺少 optimizer.pt。"""
+    path = root / f"step_{step:07d}"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "metadata.json").write_text("{}", encoding="utf-8")
+    if complete:
+        (path / "optimizer.pt").write_bytes(b"optimizer")
+        (path / "model.safetensors").write_bytes(b"weights")
+    return path
+
+
+def test_prune_keep_last_n_deletes_older_checkpoints(tmp_path: Path) -> None:
+    """keep_last_n=2：最近的 n 个保留，更旧的完整 checkpoint 被删除。"""
+    for step in range(1, 6):
+        _make_checkpoint_dir(tmp_path, step)
+
+    deleted = prune_checkpoints(tmp_path, keep_last_n=2, keep_every=0)
+
+    assert [path.name for path in deleted] == [
+        "step_0000001", "step_0000002", "step_0000003"]
+    assert sorted(path.name for path in tmp_path.glob("step_*")) == [
+        "step_0000004", "step_0000005"]
+
+
+def test_prune_keeps_milestones_even_without_recency(tmp_path: Path) -> None:
+    """keep_every=2 且 keep_last_n=0：只保留里程碑，其余全删。"""
+    for step in range(1, 7):
+        _make_checkpoint_dir(tmp_path, step)
+
+    deleted = prune_checkpoints(tmp_path, keep_last_n=0, keep_every=2)
+
+    assert [path.name for path in deleted] == [
+        "step_0000001", "step_0000003", "step_0000005"]
+    assert sorted(path.name for path in tmp_path.glob("step_*")) == [
+        "step_0000002", "step_0000004", "step_0000006"]
+
+
+def test_prune_combines_recency_and_milestones(tmp_path: Path) -> None:
+    """里程碑与最近 n 个取并集保留。"""
+    for step in range(1, 7):
+        _make_checkpoint_dir(tmp_path, step)
+
+    deleted = prune_checkpoints(tmp_path, keep_last_n=2, keep_every=3)
+
+    assert [path.name for path in deleted] == [
+        "step_0000001", "step_0000002", "step_0000004"]
+    assert sorted(path.name for path in tmp_path.glob("step_*")) == [
+        "step_0000003", "step_0000005", "step_0000006"]
+
+
+def test_prune_protects_requested_directory(tmp_path: Path) -> None:
+    """protect 指向的目录即使不满足任何保留规则也不删除。"""
+    for step in range(1, 6):
+        _make_checkpoint_dir(tmp_path, step)
+    protect = tmp_path / "step_0000002"
+
+    deleted = prune_checkpoints(
+        tmp_path, keep_last_n=0, keep_every=10, protect=protect)
+
+    assert [path.name for path in deleted] == [
+        "step_0000001", "step_0000003", "step_0000004", "step_0000005"]
+    assert protect.is_dir()
+
+
+def test_prune_skips_incomplete_and_unknown_directories(
+        tmp_path: Path) -> None:
+    """半成品 checkpoint 与非 step_* 目录不参与清理。"""
+    for step in range(1, 4):
+        _make_checkpoint_dir(tmp_path, step)
+    incomplete = _make_checkpoint_dir(tmp_path, 4, complete=False)
+    unrelated = tmp_path / "scratch"
+    unrelated.mkdir()
+
+    deleted = prune_checkpoints(tmp_path, keep_last_n=1, keep_every=0)
+
+    assert [path.name for path in deleted] == [
+        "step_0000001", "step_0000002"]
+    assert incomplete.is_dir()
+    assert unrelated.is_dir()
+    assert (tmp_path / "step_0000003").is_dir()
+
+
+def test_prune_disabled_by_default(tmp_path: Path) -> None:
+    """keep_last_n / keep_every 均为 0 时不清理，行为与历史全保留一致。"""
+    for step in range(1, 4):
+        _make_checkpoint_dir(tmp_path, step)
+
+    deleted = prune_checkpoints(tmp_path, keep_last_n=0, keep_every=0)
+
+    assert deleted == []
+    assert len(list(tmp_path.glob("step_*"))) == 3
+
+
+def test_save_checkpoint_applies_retention(tmp_path: Path) -> None:
+    """save_checkpoint 按 keep_last_n 清理旧目录，latest 指向新目录。"""
+    model = _small_pi05()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    ctx = _rank0_context()
+    output_dir = tmp_path / "train"
+
+    for step in (7, 14, 21):
+        save_checkpoint(
+            model,
+            optimizer,
+            step=step,
+            output_dir=str(output_dir),
+            ctx=ctx,
+            keep_last_n=2,
+        )
+
+    remaining = sorted(path.name for path in output_dir.glob("step_*"))
+    assert remaining == ["step_0000014", "step_0000021"]
+    assert latest_checkpoint_path(str(output_dir)) == output_dir / "step_0000021"

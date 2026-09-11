@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import time
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any, NamedTuple
@@ -37,6 +38,14 @@ from neat_pi.training.checkpoint import (
 from neat_pi.training.data import build_train_loader
 from neat_pi.training.dummy_model import DummyPi05
 from neat_pi.training.fsdp import clip_grad_norm, wrap_model_fsdp
+
+
+def _format_eta(seconds: float) -> str:
+    """把剩余秒数格式化为 HH:MM:SS。"""
+    seconds = max(int(seconds), 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 class TrainBatch(NamedTuple):
@@ -125,10 +134,16 @@ def train(
     max_steps = cfg.training.max_steps
     model.train()
     optimizer.zero_grad(set_to_none=True)
-    data_iter = iter(loader)
     epoch = start_epoch
     optimizer_step = start_step
     micro_step = start_micro_step
+    # 续训时恢复中断前 epoch 的 shuffle 顺序；全新训练 start_epoch=0，
+    # 与 DistributedSampler 的默认值一致，行为不变
+    sampler.set_epoch(epoch)
+    data_iter = iter(loader)
+    # per-step 耗时 EMA：跳过第一个 optimizer step（含数据冷启动）
+    last_step_time: float | None = None
+    s_per_step: float | None = None
     accumulation_losses: list[torch.Tensor] = []
     if ctx.is_main_process:
         logger.info(
@@ -175,17 +190,29 @@ def train(
         optimizer.zero_grad(set_to_none=True)
         optimizer_step += 1
 
+        now = time.perf_counter()
+        if last_step_time is not None:
+            elapsed = now - last_step_time
+            s_per_step = (elapsed if s_per_step is None
+                          else 0.1 * elapsed + 0.9 * s_per_step)
+        last_step_time = now
+
         if ctx.is_main_process and optimizer_step % cfg.training.log_every == 0:
             mean_loss = torch.stack(accumulation_losses).mean().item()
             grad_norm_text = (
                 f" | grad_norm {grad_norm:.4f}"
                 if grad_norm is not None else "")
+            timing_text = (
+                f" | {s_per_step:.2f} s/step"
+                f" | eta {_format_eta((max_steps - optimizer_step) * s_per_step)}"
+                if s_per_step is not None else "")
             logger.info(
-                "step {}/{} | loss {:.4f}{} | micro steps {}",
+                "step {}/{} | loss {:.4f}{}{} | micro steps {}",
                 optimizer_step,
                 max_steps,
                 mean_loss,
                 grad_norm_text,
+                timing_text,
                 micro_step,
             )
         if optimizer_step % cfg.training.save_every == 0:
@@ -200,6 +227,8 @@ def train(
                     "epoch": epoch,
                     "micro_step": micro_step,
                 },
+                keep_last_n=cfg.training.keep_last_n,
+                keep_every=cfg.training.keep_every,
             )
         accumulation_losses.clear()
 

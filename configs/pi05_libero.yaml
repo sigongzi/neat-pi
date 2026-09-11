@@ -37,6 +37,10 @@ training:
   weight_decay: 0.0
   log_every: 10
   save_every: 1000
+  # checkpoint 保留策略（prune_checkpoints）：只留最近 3 份 + 里程碑，
+  # 防止 ~40GB/份的 full checkpoint 撑爆磁盘；0/0 = 不清理
+  keep_last_n: 3
+  keep_every: 2000
   output_dir: outputs/pi05_libero
   fsdp:
     sharding_strategy: full_shard   # full_shard | shard_grad_op | no_shard

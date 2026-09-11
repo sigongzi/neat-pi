@@ -103,6 +103,8 @@ def test_forward_prefetch_conflicts_with_activation_checkpointing() -> None:
     ("grad_accum_steps", -1),
     ("log_every", "10"),
     ("save_every", 0),
+    ("keep_last_n", -1),
+    ("keep_every", "3"),
     ("lr", -0.1),
     ("weight_decay", "0"),
     ("gradient_clip_norm", 0),

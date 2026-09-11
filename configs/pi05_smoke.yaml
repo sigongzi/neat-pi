@@ -52,6 +52,7 @@ training:
   weight_decay: 0.0
   log_every: 1
   save_every: 100       # 20 步不触发保存；checkpoint 路径由单测覆盖
+  keep_last_n: 2        # 冒烟也走保留策略；更短间隔的清理验证见计划 08 Step 2
   output_dir: outputs/smoke_grad_flow
   gradient_clip_norm: 1.0
   grad_accum_steps: 1
