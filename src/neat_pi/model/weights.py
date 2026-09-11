@@ -368,7 +368,10 @@ def load_pi05_weights_distributed(
     if not dist.is_available() or not dist.is_initialized():
         raise RuntimeError("分布式权重加载要求已初始化 torch.distributed")
 
-    source_rank = ctx.rank
+    # 广播根必须全 rank 一致地指向 0（rank0 是唯一读 checkpoint 的进程）。
+    # 旧实现误用 ctx.rank：每个 rank 自认为根，集合通信的 src 互不一致
+    # ——gloo 直接死锁，NCCL 上是未定义行为。
+    source_rank = 0
     state = model.state_dict()
     expected_names = set(canonical_pi05_state_dict(model))
     loaded_names: set[str] = set()
@@ -417,9 +420,12 @@ def load_pi05_weights_distributed(
                         f"形状不匹配: {canonical_name} 模型 "
                         f"{tuple(state[internal_name].shape)} vs checkpoint "
                         f"{tuple(tensor.shape)}")
-                payload = state[internal_name].detach().clone()
-                payload.copy_(tensor)
-                broadcast_tensor(payload)
+                # 直接在参数的 detached 视图上拷贝并广播（storage 共享）：
+                # rank0 自身参数被写回，其余 rank 由 broadcast 原地覆写。
+                # 旧实现在 clone 上拷贝后广播，rank0 的参数从未被写入。
+                target = state[internal_name].detach()
+                target.copy_(tensor)
+                broadcast_tensor(target)
                 loaded_names.add(canonical_name)
             broadcast_control({"event": "done"})
         except Exception as exc:
@@ -443,9 +449,9 @@ def load_pi05_weights_distributed(
                 skipped_names.add(control["label"])
                 continue
             internal_name = canonical_to_internal_name(canonical_name)
-            payload = state[internal_name].detach().clone()
-            broadcast_tensor(payload)
-            state[internal_name].copy_(payload)
+            # broadcast 原地写入参数的 detached 视图（与参数共享 storage）
+            target = state[internal_name].detach()
+            broadcast_tensor(target)
             loaded_names.add(canonical_name)
 
     if loaded_names != expected_names:
