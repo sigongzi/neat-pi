@@ -210,30 +210,36 @@ def latest_checkpoint_path(output_dir: str) -> Path | None:
     return checkpoint_path
 
 
-def load_checkpoint(
+def load_checkpoint_weights(model: nn.Module, path: str | Path) -> int:
+    """从训练 checkpoint 恢复模型权重（canonical safetensors），返回 step。
+
+    必须在 FSDP 包装前的未分片模型上调用：包装后的参数是 rank 本地分片，
+    state_dict 视图不支持就地写入完整张量——单进程不复现，多卡会报错或
+    静默写坏。多卡训练应由 run_training 走 load_pi05_weights_distributed
+    （rank0 读取 + 广播）；本函数用于单进程 / 每 rank 独立读取的场景。
+    """
+    weights_path = Path(path) / _CHECKPOINT_WEIGHTS
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"checkpoint 缺少权重文件: {weights_path}")
+    load_pi05_state_dict_safetensors(model, weights_path)
+    metadata = load_checkpoint_metadata(path)
+    return int(metadata.get("step", 0))
+
+
+def load_checkpoint_optimizer(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     path: str | Path,
-) -> int:
-    """加载训练 checkpoint，返回已训练的 optimizer step 数。"""
-    checkpoint_path = Path(path)
-    if checkpoint_path.is_file():
-        checkpoint = torch.load(
-            checkpoint_path,
-            map_location="cpu",
-            weights_only=True,
-        )
-        model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        return int(checkpoint["step"])
+) -> None:
+    """从训练 checkpoint 恢复优化器状态，支持 FSDP 分片优化器回填。
 
-    weights_path = checkpoint_path / _CHECKPOINT_WEIGHTS
-    optimizer_path = checkpoint_path / _CHECKPOINT_OPTIMIZER
-    metadata_path = checkpoint_path / _CHECKPOINT_METADATA
-    if not weights_path.is_file() or not optimizer_path.is_file():
-        raise FileNotFoundError(f"checkpoint 不完整: {checkpoint_path}")
-
-    load_pi05_state_dict_safetensors(model, weights_path)
+    须在 optimizer 创建之后调用（FSDP 训练中即 wrap 后）；FSDP 模型经
+    optim_state_dict_to_load 把 rank0 聚合的 full optimizer state 映射
+    回分片形态。
+    """
+    optimizer_path = Path(path) / _CHECKPOINT_OPTIMIZER
+    if not optimizer_path.is_file():
+        raise FileNotFoundError(f"checkpoint 缺少优化器文件: {optimizer_path}")
     optimizer_state = torch.load(
         optimizer_path,
         map_location="cpu",
@@ -246,11 +252,6 @@ def load_checkpoint(
             optimizer_state,
         )
     optimizer.load_state_dict(optimizer_state)
-
-    if not metadata_path.is_file():
-        return 0
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    return int(metadata.get("step", 0))
 
 
 def load_checkpoint_metadata(path: str | Path) -> dict[str, Any]:

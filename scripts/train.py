@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import random
 import time
 from collections.abc import Callable
@@ -32,8 +33,8 @@ from neat_pi.model.weights import load_pi05_weights_distributed
 from neat_pi.training.checkpoint import save_checkpoint
 from neat_pi.training.checkpoint import (
     latest_checkpoint_path,
-    load_checkpoint,
     load_checkpoint_metadata,
+    load_checkpoint_optimizer,
 )
 from neat_pi.training.data import build_train_loader
 from neat_pi.training.dummy_model import DummyPi05
@@ -282,6 +283,27 @@ def run_training(config_path: str) -> None:
                     load_result.loaded_count,
                     load_result.skipped_count,
                 )
+
+        # 续训的权重必须在 FSDP 包装前恢复进未分片模型：包装后的参数是
+        # rank 本地分片，state_dict 视图不支持就地写入完整张量——单卡
+        # 不复现，多卡会报错或静默写坏。多卡走 rank0 读取 + 广播。
+        resume_checkpoint: Path | None = None
+        start_step = 0
+        start_epoch = 0
+        start_micro_step = 0
+        if cfg.training.resume:
+            resume_checkpoint = latest_checkpoint_path(cfg.training.output_dir)
+            if resume_checkpoint is None:
+                raise FileNotFoundError(
+                    f"resume=true 但没有可用 checkpoint: {cfg.training.output_dir}")
+            load_pi05_weights_distributed(model, str(resume_checkpoint), ctx)
+            checkpoint_metadata = load_checkpoint_metadata(resume_checkpoint)
+            start_step = int(checkpoint_metadata.get("step", 0))
+            start_epoch = int(checkpoint_metadata.get("epoch", 0))
+            start_micro_step = int(checkpoint_metadata.get("micro_step", 0))
+            if ctx.is_main_process:
+                logger.info("恢复训练: {} | step {}", resume_checkpoint, start_step)
+
         model = wrap_model_fsdp(
             model,
             cfg.training.fsdp,
@@ -293,25 +315,8 @@ def run_training(config_path: str) -> None:
             lr=cfg.training.lr,
             weight_decay=cfg.training.weight_decay,
         )
-
-        start_step = 0
-        start_epoch = 0
-        start_micro_step = 0
-        if cfg.training.resume:
-            checkpoint_path = latest_checkpoint_path(cfg.training.output_dir)
-            if checkpoint_path is None:
-                raise FileNotFoundError(
-                    f"resume=true 但没有可用 checkpoint: {cfg.training.output_dir}")
-            start_step = load_checkpoint(
-                model,
-                optimizer,
-                checkpoint_path,
-            )
-            checkpoint_metadata = load_checkpoint_metadata(checkpoint_path)
-            start_epoch = int(checkpoint_metadata.get("epoch", 0))
-            start_micro_step = int(checkpoint_metadata.get("micro_step", 0))
-            if ctx.is_main_process:
-                logger.info("恢复训练: {} | step {}", checkpoint_path, start_step)
+        if resume_checkpoint is not None:
+            load_checkpoint_optimizer(model, optimizer, resume_checkpoint)
 
         train(
             model=model,

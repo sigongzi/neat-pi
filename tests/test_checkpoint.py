@@ -17,8 +17,9 @@ from neat_pi.model.weights import load_pi05_weights_distributed
 from neat_pi.model.weights import canonical_pi05_state_dict
 from neat_pi.training.checkpoint import (
     latest_checkpoint_path,
-    load_checkpoint,
     load_checkpoint_metadata,
+    load_checkpoint_optimizer,
+    load_checkpoint_weights,
     prune_checkpoints,
     save_checkpoint,
 )
@@ -106,6 +107,12 @@ def test_checkpoint_round_trip_uses_canonical_safetensors(
     output_dir = tmp_path / "train"
     fsdp_config = asdict(FSDPConfig())
 
+    # 产生优化器状态（exp_avg / exp_avg_sq / step），验证恢复非空状态
+    for parameter in model.parameters():
+        parameter.grad = torch.zeros_like(parameter)
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
     save_checkpoint(
         model,
         optimizer,
@@ -133,13 +140,22 @@ def test_checkpoint_round_trip_uses_canonical_safetensors(
 
     restored = _small_pi05()
     restored_optimizer = torch.optim.AdamW(restored.parameters(), lr=1e-3)
-    assert load_checkpoint(
-        restored,
-        restored_optimizer,
-        checkpoint_path,
-    ) == 7
+    # 权重与优化器分开加载：权重须在 FSDP 包装前的未分片模型上恢复
+    assert load_checkpoint_weights(restored, checkpoint_path) == 7
+    load_checkpoint_optimizer(restored, restored_optimizer, checkpoint_path)
     for name, tensor in model.state_dict().items():
         torch.testing.assert_close(restored.state_dict()[name], tensor)
+    for param, restored_param in zip(optimizer.param_groups[0]["params"],
+                                     restored_optimizer.param_groups[0]["params"],
+                                     strict=True):
+        expected_state = optimizer.state[param]
+        actual_state = restored_optimizer.state[restored_param]
+        assert set(expected_state) == set(actual_state)
+        for key, value in expected_state.items():
+            if isinstance(value, torch.Tensor):
+                torch.testing.assert_close(actual_state[key], value)
+            else:
+                assert actual_state[key] == value
 
 
 def _make_checkpoint_dir(root: Path, step: int,
