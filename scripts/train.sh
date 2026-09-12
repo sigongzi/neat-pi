@@ -17,10 +17,10 @@ MASTER_PORT=${MASTER_PORT:-29500}
 NPROC_PER_NODE=${NPROC_PER_NODE:-$(nvidia-smi -L 2>/dev/null | wc -l)}
 NPROC_PER_NODE=${NPROC_PER_NODE:-1}
 
-exec uv run torchrun \
+uv run torchrun \
     --nnodes="${NNODES}" \
     --nproc_per_node="${NPROC_PER_NODE}" \
     --node_rank="${NODE_RANK}" \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+    --master_addr="${MASTER_ADDR}" \
+    --master_port="${MASTER_PORT}" \
     scripts/train.py --config "${CONFIG}"
