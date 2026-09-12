@@ -10,47 +10,24 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from typing import Any
 
-import torch
 from loguru import logger
 from torch.utils.data import DataLoader
 
 from neat_pi.config import load_config
-
-
-def _tensor_stats(v: torch.Tensor) -> str:
-    """把张量压缩成一行描述：shape/dtype/min/max/mean。"""
-    parts = [f"shape={tuple(v.shape)}", str(v.dtype).replace("torch.", "")]
-    try:
-        parts.append(f"min={v.min().item():.3f} max={v.max().item():.3f}")
-        if v.dtype.is_floating_point:
-            parts.append(f"mean={v.float().mean().item():.3f}")
-    except RuntimeError:
-        pass
-    return " ".join(parts)
-
-
-def _print_batch(batch: dict[str, Any], indent: str = "  ") -> None:
-    """按 key 打印一个 batch 的字段形态（张量/字符串/标量）。"""
-    for key in sorted(batch):
-        v = batch[key]
-        if isinstance(v, torch.Tensor):
-            logger.info("{}{:<36} {}", indent, key, _tensor_stats(v))
-        elif isinstance(v, (list, tuple)) and v and all(isinstance(x, str) for x in v):
-            logger.info("{}{:<36} list[str] {!r}", indent, key, v[0][:100])
-        elif isinstance(v, str):
-            logger.info("{}{:<36} str {!r}", indent, key, v[:100])
-        else:
-            logger.info("{}{:<36} {}", indent, key, repr(v)[:100])
+from neat_pi.data.inspect import print_batch
 
 
 def main() -> None:
     """读取配置，取一个 batch 逐步过 preprocessor，打印每步输出形态。"""
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/pi05_libero.yaml"
-    cfg = load_config(config_path)
+    parser = argparse.ArgumentParser(description="数据管线自检：真实数据集逐步过 preprocessor")
+    parser.add_argument("--config", default="configs/pi05_libero.yaml", help="YAML 配置文件路径")
+    args = parser.parse_args()
+    cfg = load_config(args.config)
 
     from neat_pi.data.lerobot_dataset import build_dataset
     from neat_pi.data.preprocessor import load_preprocessor
@@ -76,7 +53,7 @@ def main() -> None:
 
     batch = images_to_float(next(iter(dl)))
     logger.info("== 原始 batch（collate 后）==")
-    _print_batch(batch)
+    print_batch(batch)
 
     logger.info("== 逐步过 preprocessor ==")
     final_batch: dict[str, Any] = {}
@@ -87,7 +64,7 @@ def main() -> None:
             label = type(pipe.steps[step_idx - 1]).__name__
             logger.info("-- 第 {} 步: {} --", step_idx, label)
         view = pipe.to_output(transition)
-        _print_batch(view)
+        print_batch(view)
         final_batch = view
 
     prompt = final_batch["task"][0]
