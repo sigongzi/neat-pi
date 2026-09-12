@@ -126,6 +126,7 @@ class TrainingConfig:
     lr: float = 2.5e-5
     lr_end: float = 2.5e-6      # cosine 调度终点（openpi decay_lr 默认 = lr/10）
     warmup_steps: int = 1000    # 线性 warmup 步数（openpi 默认）
+    ema_decay: float | None = 0.999  # EMA 影子权重衰减（openpi pi05 实配）；null 关闭
     weight_decay: float = 0.0
     log_every: int = 10
     save_every: int = 1000
@@ -160,6 +161,13 @@ class TrainingConfig:
                             ("lr_end", self.lr_end)):
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"training.{name} 必须是有限非负数，实际为 {value!r}")
+        if self.ema_decay is not None and (
+                not isinstance(self.ema_decay, (int, float))
+                or not math.isfinite(self.ema_decay)
+                or not 0.0 < self.ema_decay < 1.0):
+            raise ValueError(
+                "training.ema_decay 必须是 (0, 1) 内的有限数或 null，"
+                f"实际为 {self.ema_decay!r}")
         if self.gradient_clip_norm is not None and (
                 not isinstance(self.gradient_clip_norm, (int, float))
                 or not math.isfinite(self.gradient_clip_norm)

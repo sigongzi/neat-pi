@@ -33,11 +33,13 @@ from neat_pi.model.weights import load_pi05_weights_distributed
 from neat_pi.training.checkpoint import save_checkpoint
 from neat_pi.training.checkpoint import (
     latest_checkpoint_path,
+    load_checkpoint_ema,
     load_checkpoint_metadata,
     load_checkpoint_optimizer,
 )
 from neat_pi.training.data import build_train_loader
 from neat_pi.training.dummy_model import DummyPi05
+from neat_pi.training.ema import EmaTracker
 from neat_pi.training.fsdp import clip_grad_norm, wrap_model_fsdp
 from neat_pi.training.scheduler import cosine_lr_at
 
@@ -135,6 +137,7 @@ def train(
     start_step: int = 0,
     start_epoch: int = 0,
     start_micro_step: int = 0,
+    ema_tracker: EmaTracker | None = None,
 ) -> None:
     """执行 flow matching 训练循环；step 计数按 optimizer step 计算。"""
     accumulation_steps = cfg.training.grad_accum_steps
@@ -205,6 +208,9 @@ def train(
         for group in optimizer.param_groups:
             group["lr"] = current_lr
         optimizer.step()
+        if ema_tracker is not None:
+            # EMA 在参数更新后滑动（openpi 语义：decay*ema + (1-decay)*new）
+            ema_tracker.update()
         optimizer.zero_grad(set_to_none=True)
         optimizer_step += 1
 
@@ -252,9 +258,11 @@ def train(
                 metadata={
                     "epoch": epoch,
                     "micro_step": micro_step,
+                    "ema_decay": cfg.training.ema_decay,
                 },
                 keep_last_n=cfg.training.keep_last_n,
                 keep_every=cfg.training.keep_every,
+                ema_model=ema_tracker.model if ema_tracker is not None else None,
             )
         accumulation_losses.clear()
 
@@ -329,12 +337,37 @@ def run_training(config_path: str) -> None:
             if ctx.is_main_process:
                 logger.info("恢复训练: {} | step {}", resume_checkpoint, start_step)
 
+        # EMA 影子在 FSDP wrap 前构造（此时 model 已是预训练/续训权重）：
+        # 影子以当前训练参数初始化（openpi 语义）；resume 时若 checkpoint 带
+        # ema.safetensors 则覆盖为历史影子，旧 checkpoint 自然回退到该初始化
+        ema_tracker: EmaTracker | None = None
+        if cfg.training.ema_decay is not None:
+            ema_tracker = EmaTracker(model, cfg.training.ema_decay)
+            ema_restored = (
+                False if resume_checkpoint is None
+                else load_checkpoint_ema(ema_tracker.model, resume_checkpoint)
+            )
+            if ctx.is_main_process:
+                logger.info(
+                    "EMA: decay {} | {}",
+                    cfg.training.ema_decay,
+                    "从 checkpoint 恢复" if ema_restored else "从训练参数初始化",
+                )
+
         model = wrap_model_fsdp(
             model,
             cfg.training.fsdp,
             ctx,
             amp_dtype,
         )
+        if ema_tracker is not None:
+            # 影子与主模型分别独立 wrap：同构树 -> auto-wrap 决策一致、分片相同
+            ema_tracker.model = wrap_model_fsdp(
+                ema_tracker.model,
+                cfg.training.fsdp,
+                ctx,
+                amp_dtype,
+            )
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=cfg.training.lr,
@@ -354,6 +387,7 @@ def run_training(config_path: str) -> None:
             start_step=start_step,
             start_epoch=start_epoch,
             start_micro_step=start_micro_step,
+            ema_tracker=ema_tracker,
         )
     finally:
         backend.cleanup_distributed()

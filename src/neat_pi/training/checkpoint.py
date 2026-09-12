@@ -34,6 +34,7 @@ from neat_pi.model.weights import (
 _CHECKPOINT_METADATA = "metadata.json"
 _CHECKPOINT_OPTIMIZER = "optimizer.pt"
 _CHECKPOINT_WEIGHTS = "model.safetensors"
+_CHECKPOINT_EMA_WEIGHTS = "ema.safetensors"
 
 
 def _parse_checkpoint_step(path: Path) -> int | None:
@@ -110,6 +111,7 @@ def save_checkpoint(
     metadata: Mapping[str, Any] | None = None,
     keep_last_n: int = 0,
     keep_every: int = 0,
+    ema_model: nn.Module | None = None,
 ) -> None:
     """保存 FSDP full state checkpoint；rank0 负责写盘与清理。
 
@@ -118,16 +120,20 @@ def save_checkpoint(
     写盘与 latest.json 更新完成后，rank0 按 (keep_last_n, keep_every)
     清理旧 checkpoint；刚写好的目录作为 protect 永不删除。默认 0/0
     不清理。
+
+    `ema_model` 非 None 时额外写 `ema.safetensors`（EMA 影子权重，与
+    `model.safetensors` 同为 canonical Pi05 格式）；None 时不写该文件，
+    保持 checkpoint 布局与旧版本完全一致。
     """
+    state_dict_config = FullStateDictConfig(
+        offload_to_cpu=True,
+        rank0_only=True,
+    )
+    optimizer_state_config = FullOptimStateDictConfig(
+        offload_to_cpu=True,
+        rank0_only=True,
+    )
     if isinstance(model, FullyShardedDataParallel):
-        state_dict_config = FullStateDictConfig(
-            offload_to_cpu=True,
-            rank0_only=True,
-        )
-        optimizer_state_config = FullOptimStateDictConfig(
-            offload_to_cpu=True,
-            rank0_only=True,
-        )
         with FullyShardedDataParallel.state_dict_type(
             model,
             StateDictType.FULL_STATE_DICT,
@@ -144,6 +150,20 @@ def save_checkpoint(
             return
         model_state = model.state_dict()
         optimizer_state = optimizer.state_dict()
+
+    ema_state: dict[str, Any] | None = None
+    if ema_model is not None:
+        if isinstance(ema_model, FullyShardedDataParallel):
+            # 影子独立 wrap，gather 是 collective，所有 rank 都要进上下文
+            with FullyShardedDataParallel.state_dict_type(
+                ema_model,
+                StateDictType.FULL_STATE_DICT,
+                state_dict_config,
+                optimizer_state_config,
+            ):
+                ema_state = ema_model.state_dict()
+        elif ctx.is_main_process:
+            ema_state = ema_model.state_dict()
 
     if not ctx.is_main_process:
         return
@@ -173,6 +193,15 @@ def save_checkpoint(
             "world_size": ctx.world_size,
         },
     )
+    if ema_state is not None:
+        save_pi05_state_dict_safetensors(
+            ema_state,
+            checkpoint_dir / _CHECKPOINT_EMA_WEIGHTS,
+            metadata={
+                "step": step,
+                "world_size": ctx.world_size,
+            },
+        )
 
     latest_path = Path(output_dir) / "latest.json"
     latest_path.write_text(
@@ -224,6 +253,21 @@ def load_checkpoint_weights(model: nn.Module, path: str | Path) -> int:
     load_pi05_state_dict_safetensors(model, weights_path)
     metadata = load_checkpoint_metadata(path)
     return int(metadata.get("step", 0))
+
+
+def load_checkpoint_ema(model: nn.Module, path: str | Path) -> bool:
+    """从 checkpoint 恢复 EMA 影子权重（canonical safetensors）到 model。
+
+    调用约束与 `load_checkpoint_weights` 相同：FSDP 包装前的未分片模型。
+    checkpoint 无 ema.safetensors（旧 checkpoint 或训练时 ema_decay=null）
+    返回 False 且不改动 model，装配层据此让影子从训练参数起步（openpi
+    的 EMA 初始化语义）。
+    """
+    weights_path = Path(path) / _CHECKPOINT_EMA_WEIGHTS
+    if not weights_path.is_file():
+        return False
+    load_pi05_state_dict_safetensors(model, weights_path)
+    return True
 
 
 def load_checkpoint_optimizer(

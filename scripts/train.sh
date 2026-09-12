@@ -10,10 +10,11 @@
 #               PER_DEVICE_BATCH_SIZE NUM_WORKERS
 #   训练：      PRETRAINED STEPS LEARNING_RATE LR_END WARMUP_STEPS WEIGHT_DECAY
 #               GRADIENT_ACCUMULATION_STEPS GRADIENT_CLIP_NORM LOG_FREQ SAVE_FREQ
-#               KEEP_LAST_N KEEP_EVERY SEED RESUME USE_DUMMY_MODEL
+#               KEEP_LAST_N KEEP_EVERY SEED RESUME USE_DUMMY_MODEL EMA_DECAY
 #   节点/运行：  NNODES NODE_RANK MASTER_ADDR MASTER_PORT NPROC_PER_NODE
 #               OUTPUT_ROOT RUN_NAME JOB_ID
-#   可空项（PRETRAINED / GRADIENT_CLIP_NORM）置空或填 "null"/"none" 按 null 处理。
+#   可空项（PRETRAINED / GRADIENT_CLIP_NORM / EMA_DECAY）置空或填
+#   "null"/"none" 按 null 处理（EMA_DECAY 的 null 即关闭 EMA）。
 #
 # 每次 run 落在 ${OUTPUT_ROOT}/fsdp_<时间戳>/：时间戳由 node 0 经共享存储发布，
 # 保证各节点一致；目录内含 checkpoints/、各节点 resolved_config（YAML 叠加环境
@@ -38,7 +39,7 @@ OVERRIDE_VARS=(
     WEIGHT_DECAY GRADIENT_ACCUMULATION_STEPS
     GRADIENT_CLIP_NORM LOG_FREQ SAVE_FREQ
     KEEP_LAST_N KEEP_EVERY SEED RESUME
-    USE_DUMMY_MODEL
+    USE_DUMMY_MODEL EMA_DECAY
 )
 for var in "${OVERRIDE_VARS[@]}"; do
     if [[ -n "${!var+x}" ]]; then
@@ -118,6 +119,7 @@ OVERRIDES = {
     "LEARNING_RATE": ("training", "lr", float),
     "LR_END": ("training", "lr_end", float),
     "WARMUP_STEPS": ("training", "warmup_steps", int),
+    "EMA_DECAY": ("training", "ema_decay", _nullable_float),
     "WEIGHT_DECAY": ("training", "weight_decay", float),
     "GRADIENT_ACCUMULATION_STEPS": ("training", "grad_accum_steps", int),
     "GRADIENT_CLIP_NORM": ("training", "gradient_clip_norm", _nullable_float),

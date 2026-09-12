@@ -38,6 +38,9 @@ training:
   # 随后衰到 lr_end，衰减终点绑 max_steps（训完恰衰到 lr_end）
   lr_end: 2.5e-6       # openpi decay_lr 默认（lr/10）
   warmup_steps: 1000   # openpi 默认
+  # EMA 影子权重（docs/plan/11-ema.md）：每 optimizer step 向训练参数滑动，
+  # checkpoint 双份落盘（model.safetensors + ema.safetensors）；null 关闭
+  ema_decay: 0.999
   weight_decay: 0.0
   log_every: 10
   save_every: 1000

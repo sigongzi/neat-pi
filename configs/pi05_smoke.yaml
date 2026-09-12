@@ -52,6 +52,8 @@ training:
   # 短 warmup + 短衰减：20 步内走完 升温->峰值->衰减到 lr_end 的完整路径
   lr_end: 2.5e-6
   warmup_steps: 2
+  # 小 decay 让短训内影子与主权重差异可测（计划 11 §3.4）
+  ema_decay: 0.9
   weight_decay: 0.0
   log_every: 1
   save_every: 100       # 20 步不触发保存；checkpoint 路径由单测覆盖
