@@ -49,6 +49,9 @@ training:
   pretrained: null      # 随机初始化
   max_steps: 20
   lr: 2.5e-5
+  # 短 warmup + 短衰减：20 步内走完 升温->峰值->衰减到 lr_end 的完整路径
+  lr_end: 2.5e-6
+  warmup_steps: 2
   weight_decay: 0.0
   log_every: 1
   save_every: 100       # 20 步不触发保存；checkpoint 路径由单测覆盖

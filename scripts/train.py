@@ -39,6 +39,7 @@ from neat_pi.training.checkpoint import (
 from neat_pi.training.data import build_train_loader
 from neat_pi.training.dummy_model import DummyPi05
 from neat_pi.training.fsdp import clip_grad_norm, wrap_model_fsdp
+from neat_pi.training.scheduler import cosine_lr_at
 
 
 def _format_eta(seconds: float) -> str:
@@ -192,6 +193,17 @@ def train(
         grad_norm: torch.Tensor | None = None
         if cfg.training.gradient_clip_norm is not None:
             grad_norm = clip_grad_norm(model, cfg.training.gradient_clip_norm)
+        # cosine 调度按"已完成的 optimizer step 数"（0 起）取学习率，无状态、
+        # 续训直接重算；第 1 个 optimizer step 用 schedule(0)
+        current_lr = cosine_lr_at(
+            optimizer_step,
+            peak_lr=cfg.training.lr,
+            lr_end=cfg.training.lr_end,
+            warmup_steps=cfg.training.warmup_steps,
+            total_steps=max_steps,
+        )
+        for group in optimizer.param_groups:
+            group["lr"] = current_lr
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         optimizer_step += 1
@@ -208,6 +220,7 @@ def train(
             grad_norm_text = (
                 f" | grad_norm {grad_norm:.4f}"
                 if grad_norm is not None else "")
+            lr_text = f" | lr {current_lr:.2e}"
             timing_text = (
                 f" | {s_per_step:.2f} s/step"
                 f" | eta {_format_eta((max_steps - optimizer_step) * s_per_step)}"
@@ -218,11 +231,12 @@ def train(
             backend.reset_peak_memory_stats(ctx)
             peak_text = f" | peak {_format_gib(peak_bytes)}" if peak_bytes > 0 else ""
             logger.info(
-                "step {}/{} | loss {:.4f}{}{}{} | micro steps {}",
+                "step {}/{} | loss {:.4f}{}{}{}{} | micro steps {}",
                 optimizer_step,
                 max_steps,
                 mean_loss,
                 grad_norm_text,
+                lr_text,
                 timing_text,
                 peak_text,
                 micro_step,

@@ -124,6 +124,8 @@ class TrainingConfig:
     use_dummy_model: bool = True   # True=用 DummyPi05 冒烟跑通训练循环；Pi05.predict_velocity 实现后改 False
     max_steps: int = 10000
     lr: float = 2.5e-5
+    lr_end: float = 2.5e-6      # cosine 调度终点（openpi decay_lr 默认 = lr/10）
+    warmup_steps: int = 1000    # 线性 warmup 步数（openpi 默认）
     weight_decay: float = 0.0
     log_every: int = 10
     save_every: int = 1000
@@ -149,11 +151,13 @@ class TrainingConfig:
                 raise ValueError(f"training.{name} 必须是正整数，实际为 {value!r}")
         # checkpoint 保留策略：0 是合法值（关闭对应保留维度），负数 / 非整数非法
         for name, value in (("keep_last_n", self.keep_last_n),
-                            ("keep_every", self.keep_every)):
+                            ("keep_every", self.keep_every),
+                            ("warmup_steps", self.warmup_steps)):
             if type(value) is not int or value < 0:
                 raise ValueError(
                     f"training.{name} 必须是非负整数，实际为 {value!r}")
-        for name, value in (("lr", self.lr), ("weight_decay", self.weight_decay)):
+        for name, value in (("lr", self.lr), ("weight_decay", self.weight_decay),
+                            ("lr_end", self.lr_end)):
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"training.{name} 必须是有限非负数，实际为 {value!r}")
         if self.gradient_clip_norm is not None and (
