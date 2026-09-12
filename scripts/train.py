@@ -49,6 +49,11 @@ def _format_eta(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _format_gib(num_bytes: int) -> str:
+    """把字节数格式化为 GiB 字符串（一位小数）。"""
+    return f"{num_bytes / 1024**3:.1f} GiB"
+
+
 class TrainBatch(NamedTuple):
     """一个训练 batch 的模型侧形态：action 已补零到模型维度。"""
 
@@ -207,13 +212,19 @@ def train(
                 f" | {s_per_step:.2f} s/step"
                 f" | eta {_format_eta((max_steps - optimizer_step) * s_per_step)}"
                 if s_per_step is not None else "")
+            # 本窗口显存峰值：读后即清，下条日志从零计；首个窗口含模型构建
+            # 峰值。0 为 CPU（backend 固定返回 0），省略字段
+            peak_bytes = backend.max_memory_allocated(ctx)
+            backend.reset_peak_memory_stats(ctx)
+            peak_text = f" | peak {_format_gib(peak_bytes)}" if peak_bytes > 0 else ""
             logger.info(
-                "step {}/{} | loss {:.4f}{}{} | micro steps {}",
+                "step {}/{} | loss {:.4f}{}{}{} | micro steps {}",
                 optimizer_step,
                 max_steps,
                 mean_loss,
                 grad_norm_text,
                 timing_text,
+                peak_text,
                 micro_step,
             )
         if optimizer_step % cfg.training.save_every == 0:
