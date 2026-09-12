@@ -62,7 +62,7 @@ def main() -> None:
 
     dl = DataLoader(
         ds,
-        batch_size=cfg.data.batch_size,
+        batch_size=cfg.data.per_device_batch_size,
         num_workers=cfg.data.num_workers,
         shuffle=False,
     )

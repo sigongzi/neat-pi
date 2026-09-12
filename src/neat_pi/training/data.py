@@ -24,7 +24,7 @@ def build_train_loader(
     )
     loader = DataLoader(
         dataset,
-        batch_size=cfg.data.batch_size,
+        batch_size=cfg.data.per_device_batch_size,
         sampler=sampler,
         num_workers=cfg.data.num_workers,
         shuffle=False,

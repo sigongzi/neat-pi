@@ -15,7 +15,7 @@ model:
 data:
   repo_id: libero       # 仅作标识；实际从本地路径加载
   root: /home/ivoryseagull/neat-pi-old/data/lerobot/libero
-  batch_size: 8
+  per_device_batch_size: 8
   num_workers: 4
   # 预处理管线用本项目自己的声明式 JSON（步骤含自写 GemmaTokenizerStep）；
   # normalizer 统计 / tokenizer 词表仍从 finetuned checkpoint 目录取，保证与权重训练时一致

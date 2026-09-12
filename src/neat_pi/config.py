@@ -57,7 +57,7 @@ class DataConfig:
 
     repo_id: str = "libero"
     root: str = ""
-    batch_size: int = 8
+    per_device_batch_size: int = 8  # 每个 rank / device 的 micro batch 大小
     num_workers: int = 4
     preprocessor_path: str = ""  # 本项目 policy_preprocessor.json 的文件路径
     postprocessor_path: str = ""  # 本项目 policy_postprocessor.json（推理侧 unnormalize + delta→指令）

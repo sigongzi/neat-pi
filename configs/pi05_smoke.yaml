@@ -38,7 +38,7 @@ model:
 data:
   repo_id: libero
   root: /home/ivoryseagull/neat-pi-old/data/lerobot/libero
-  batch_size: 4
+  per_device_batch_size: 4
   num_workers: 2
   preprocessor_path: configs/pi05_libero_preprocessor.json
   postprocessor_path: configs/pi05_libero_postprocessor.json

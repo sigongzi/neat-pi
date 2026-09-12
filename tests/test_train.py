@@ -25,7 +25,7 @@ def _cpu_rank(rank: int, world_size: int = 2) -> DeviceContext:
 def test_distributed_loader_splits_indices_without_overlap() -> None:
     """两个 rank 的 micro batch 样本互不重复，且各 rank batch 数一致。"""
     cfg = Config()
-    cfg.data.batch_size = 2
+    cfg.data.per_device_batch_size = 2
     cfg.data.num_workers = 0
     dataset = TensorDataset(torch.arange(8))
 

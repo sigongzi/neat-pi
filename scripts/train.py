@@ -260,12 +260,12 @@ def run_training(config_path: str) -> None:
         loader, sampler = build_train_loader(dataset, cfg, ctx)
         if len(loader) == 0:
             raise ValueError(
-                "数据集在当前 rank/batch_size 下没有可用训练 batch")
+                "数据集在当前 rank/per_device_batch_size 下没有可用训练 batch")
         if ctx.is_main_process:
             logger.info(
                 "数据集: {} 帧 | rank batch {} | rank batches {}",
                 len(dataset),
-                cfg.data.batch_size,
+                cfg.data.per_device_batch_size,
                 len(loader),
             )
 
