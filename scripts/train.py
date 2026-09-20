@@ -19,17 +19,17 @@ import random
 import time
 from collections.abc import Callable
 from dataclasses import asdict
-from typing import Any, NamedTuple
+from typing import Any
 
 import torch
 from loguru import logger
-from torch.nn import functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 
 from neat_pi.config import Config, load_config
 from neat_pi.data.transforms import images_to_float
 from neat_pi.device import backend
 from neat_pi.model.weights import load_pi05_weights_distributed
+from neat_pi.training.batch import TrainBatch, prepare_batch
 from neat_pi.training.checkpoint import save_checkpoint
 from neat_pi.training.checkpoint import (
     latest_checkpoint_path,
@@ -55,56 +55,6 @@ def _format_eta(seconds: float) -> str:
 def _format_gib(num_bytes: int) -> str:
     """把字节数格式化为 GiB 字符串（一位小数）。"""
     return f"{num_bytes / 1024**3:.1f} GiB"
-
-
-class TrainBatch(NamedTuple):
-    """一个训练 batch 的模型侧形态：action 已补零到模型维度。"""
-
-    images: list[torch.Tensor]  # 各相机图像 (B,3,H,W)，[-1,1]
-    image_masks: list[torch.Tensor]  # 各相机可用性 (B,)，True=有效
-    token_ids: torch.Tensor     # (B, max_token_len)
-    lang_mask: torch.Tensor     # (B, max_token_len)，True=有效语言 token
-    actions: torch.Tensor       # (B, action_horizon, action_dim) 补零后
-    is_pad: torch.Tensor        # (B, action_horizon)，True=padding 帧
-    real_action_dim: int        # padding 前的真实动作维
-
-
-def prepare_batch(cfg: Config, batch: dict[str, Any],
-                  device: torch.device) -> TrainBatch:
-    """把 preprocessor 输出的 batch 整理成模型输入。
-
-    action 维度不足 `model.action_dim` 时在右侧补零；语言 attention mask
-    原样传给 Pi05 构造 prefix mask。
-    """
-    images = [batch[key].to(device) for key in sorted(batch)
-              if key.startswith("observation.images.")]
-    image_masks = [
-        torch.ones(image.shape[0], dtype=torch.bool, device=device)
-        for image in images
-    ]
-    token_ids = batch["observation.language.tokens"].to(device).long()
-    lang_mask = batch["observation.language.attention_mask"].to(device).bool()
-    actions = batch["action"].to(device).float()
-    is_pad = batch.get("action_is_pad")
-    is_pad = (
-        torch.zeros_like(actions[..., 0]).bool()
-        if is_pad is None
-        else is_pad.to(device).bool()
-    )
-    real_action_dim = actions.shape[-1]
-    actions = F.pad(
-        actions,
-        (0, cfg.model.action_dim - actions.shape[-1]),
-    )
-    return TrainBatch(
-        images,
-        image_masks,
-        token_ids,
-        lang_mask,
-        actions,
-        is_pad,
-        real_action_dim,
-    )
 
 
 def build_model(cfg: Config, ctx: backend.DeviceContext,

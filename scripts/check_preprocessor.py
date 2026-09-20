@@ -171,10 +171,12 @@ def main() -> None:
     else:
         visual, _, _ = declared_features(pipe)
         image_keys = sorted(visual)
-        if not args.preprocessor and len(image_keys) != cfg.model.num_cameras:
+        # 语义与 build_dataset 一致：数据集相机数不得超过 num_cameras，
+        # 缺少的槽位由 prepare_batch 注入 empty camera（-1 填充、mask=False）
+        if not args.preprocessor and len(image_keys) > cfg.model.num_cameras:
             raise ValueError(
                 f"管线 normalizer 声明 {len(image_keys)} 路图像（{image_keys}）"
-                f"与配置 num_cameras={cfg.model.num_cameras} 不一致")
+                f"超过配置 num_cameras={cfg.model.num_cameras}")
         batch = build_fake_batch(cfg, pipe)
 
     logger.info("== 原始 batch（{}）==", "数据集" if args.dataset else "假形状数据")

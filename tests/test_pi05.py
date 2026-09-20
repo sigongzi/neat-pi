@@ -306,3 +306,58 @@ def test_flow_matching_loss_backward_reaches_all_components(
     assert model.action_expert.time_mlp_out.weight.grad is not None
     assert model.action_expert.layers[0].self_attn.q_proj.weight.grad is not None
     assert model.action_expert.layers[0].mlp.down_proj.weight.grad is not None
+
+
+def test_masked_camera_slot_is_inert(generator: torch.Generator) -> None:
+    """empty camera 合同：mask=False 的相机槽位内容不影响速度预测。
+
+    对齐评测合同（eval/observation.py）：empty camera 填 -1 且整段
+    mask=False。模型零初始化（RMSNorm / adaLN-Zero gate 全零）时 action
+    输出与 prefix 解耦，须先小步训练解锁共享链路（同
+    test_flow_matching_loss_backward_reaches_all_components 的做法）再验证：
+    1. 同一 batch 仅改变 masked 槽位填充值（-1 vs +1），速度输出逐元素
+       一致——mask 真正挡住了该槽位的所有 token；
+    2. 对照组：同槽位置 mask=True 时，填充值改变会导致输出不同——证明
+       第 1 条不是输出对输入天然不敏感的假阳性。
+    """
+    model = Pi05(_small_model_config())
+    images = [torch.randn(2, 3, 16, 16, generator=generator)
+              for _ in range(2)]
+    real_masks = [torch.ones(2, dtype=torch.bool) for _ in range(2)]
+    token_ids = torch.randint(0, 64, (2, 6), generator=generator)
+    lang_mask = torch.ones(2, 6, dtype=torch.bool)
+    actions = torch.randn(2, 3, 7, generator=generator)
+    is_pad = torch.zeros(2, 3, dtype=torch.bool)
+
+    # 解锁零初始化的共享 attention 链路：几步小更新让 RMSNorm weight 与
+    # adaLN gate 离开全零，prefix 才可能影响 action 输出
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    for _ in range(20):
+        torch.manual_seed(2024)
+        loss = model(images, real_masks, token_ids, lang_mask, actions,
+                     is_pad, real_action_dim=5)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    model.eval()
+
+    noisy_action = torch.randn(2, 3, 7, generator=generator)
+    t = torch.rand(2, generator=generator)
+
+    def predict(empty_fill: float, empty_visible: bool) -> torch.Tensor:
+        empty = torch.full((2, 3, 16, 16), empty_fill)
+        masks = real_masks + [
+            torch.ones(2, dtype=torch.bool) if empty_visible
+            else torch.zeros(2, dtype=torch.bool)]
+        with torch.no_grad():
+            return model.predict_velocity(
+                images + [empty], masks, token_ids, lang_mask,
+                noisy_action, t)
+
+    masked_neg1 = predict(-1.0, empty_visible=False)
+    masked_pos1 = predict(1.0, empty_visible=False)
+    torch.testing.assert_close(masked_neg1, masked_pos1)
+
+    visible_neg1 = predict(-1.0, empty_visible=True)
+    visible_pos1 = predict(1.0, empty_visible=True)
+    assert not torch.allclose(visible_neg1, visible_pos1)
