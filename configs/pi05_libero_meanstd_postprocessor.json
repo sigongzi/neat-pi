@@ -1,0 +1,32 @@
+{
+  "name": "pi05_libero_meanstd_postprocessor",
+  "steps": [
+    {
+      "registry_name": "unnormalizer_processor",
+      "config": {
+        "eps": 1e-08,
+        "features": {
+          "action": {
+            "type": "ACTION",
+            "shape": [
+              7
+            ]
+          }
+        },
+        "norm_map": {
+          "ACTION": "MEAN_STD",
+          "STATE": "MEAN_STD",
+          "VISUAL": "IDENTITY"
+        }
+      },
+      "state_file": "/home/ivoryseagull/neat-pi-old/checkpoints/pi05_libero_finetuned/policy_postprocessor_step_0_unnormalizer_processor.safetensors"
+    },
+    {
+      "registry_name": "device_processor",
+      "config": {
+        "device": "cpu",
+        "float_dtype": null
+      }
+    }
+  ]
+}

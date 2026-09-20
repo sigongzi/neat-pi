@@ -1,0 +1,84 @@
+{
+  "name": "pi05_libero_meanstd_preprocessor",
+  "steps": [
+    {
+      "registry_name": "rename_observations_processor",
+      "config": {
+        "rename_map": {}
+      }
+    },
+    {
+      "registry_name": "to_batch_processor",
+      "config": {}
+    },
+    {
+      "registry_name": "normalizer_processor",
+      "config": {
+        "eps": 1e-08,
+        "features": {
+          "observation.images.image": {
+            "type": "VISUAL",
+            "shape": [
+              3,
+              224,
+              224
+            ]
+          },
+          "observation.images.image2": {
+            "type": "VISUAL",
+            "shape": [
+              3,
+              224,
+              224
+            ]
+          },
+          "observation.images.empty_camera_0": {
+            "type": "VISUAL",
+            "shape": [
+              3,
+              224,
+              224
+            ]
+          },
+          "observation.state": {
+            "type": "STATE",
+            "shape": [
+              8
+            ]
+          },
+          "action": {
+            "type": "ACTION",
+            "shape": [
+              7
+            ]
+          }
+        },
+        "norm_map": {
+          "ACTION": "MEAN_STD",
+          "STATE": "MEAN_STD",
+          "VISUAL": "IDENTITY"
+        }
+      },
+      "state_file": "/home/ivoryseagull/neat-pi-old/checkpoints/pi05_libero_finetuned/policy_preprocessor_step_2_normalizer_processor.safetensors"
+    },
+    {
+      "registry_name": "pi05_prepare_state_tokenizer_processor_step",
+      "config": {}
+    },
+    {
+      "class": "neat_pi.data.tokenizer.GemmaTokenizerStep",
+      "config": {
+        "tokenizer_path": "/home/ivoryseagull/neat-pi-old/checkpoints/pi05_libero_finetuned/tokenizer.json",
+        "max_length": 200,
+        "task_key": "task"
+      }
+    },
+    {
+      "registry_name": "device_processor",
+      "config": {
+        "device": "cpu",
+        "float_dtype": null
+      }
+    }
+  ]
+}
