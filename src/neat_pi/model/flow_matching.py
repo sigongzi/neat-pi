@@ -38,6 +38,19 @@ class FlowMatchingModel(nn.Module):
         raise NotImplementedError
 
     @typechecked
+    def sample_time(self, bsize: int, device: torch.device) -> TimeB:
+        """采样 flow 时间步：Beta(1.5, 1.0) 后仿射到 [0.001, 1.0]。
+
+        对齐 ref/openpi pi0_pytorch 的 sample_time：密度 ∝ √t，向高噪声端
+        加权；仿射避开 t=0（数据端）与 t=1（噪声端）的退化取值。
+        """
+        alpha = torch.as_tensor(1.5, dtype=torch.float32, device=device)
+        beta = torch.as_tensor(1.0, dtype=torch.float32, device=device)
+        time_beta = torch.distributions.Beta(alpha, beta).sample((bsize,))
+        return (time_beta * 0.999 + 0.001).to(
+            dtype=torch.float32, device=device)
+
+    @typechecked
     def forward(self, images: list[ImageBCHW], image_masks: list[MaskB],
                 token_ids: TokenIdsBL, lang_mask: MaskBL, actions: ActionBHD,
                 is_pad: MaskBH,
@@ -45,12 +58,14 @@ class FlowMatchingModel(nn.Module):
         """采样 t 与噪声，预测速度场，返回有效步/维上的 masked MSE 标量损失。
 
         时间约定对齐 ref/openpi：t=1 纯噪声、t=0 数据，x_t = t*noise +
-        (1-t)*data，目标速度 u_t = noise - data；推理时从 t=1（x = 噪声）
-        以负步长积分回 t=0（见 Pi05.sample_actions，方向须与本处一致）。
-        padding 的时间步（episode 末尾）与补零的动作维不参与损失。
+        (1-t)*data，目标速度 u_t = noise - data；t 从 Beta(1.5, 1.0) 采样
+        （见 sample_time，对齐 ref/openpi pi0_pytorch）。推理时从 t=1
+        （x = 噪声）以负步长积分回 t=0（见 Pi05.sample_actions，方向须与
+        本处一致）。padding 的时间步（episode 末尾）与补零的动作维不参与
+        损失。
         """
         b = actions.shape[0]
-        t = torch.rand(b, device=actions.device, dtype=torch.float32)
+        t = self.sample_time(b, actions.device)
         noise = torch.randn_like(actions)
         # 时间约定对齐 ref/openpi：t=1 纯噪声、t=0 数据，x_t = t*noise + (1-t)*data，
         # 目标速度 u_t = noise - data；采样时从 t=1（x = 噪声）积分回 t=0
