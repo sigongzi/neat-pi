@@ -157,6 +157,30 @@ def train(
         )
         for group in optimizer.param_groups:
             group["lr"] = current_lr
+        # 梯度保护：clip 时算出的总范数非有限（inf/NaN）说明本窗口前向/
+        # 反传已数值崩溃，沿用会污染权重与 EMA 影子——直接丢弃本步。
+        # step 计数照常推进（否则持续 NaN 会永远卡在当前步），日志显式
+        # 记录丢弃事件。gradient_clip_norm=null 时无范数可用，不做保护。
+        if grad_norm is not None and not torch.isfinite(grad_norm):
+            optimizer.zero_grad(set_to_none=True)
+            accumulation_losses.clear()
+            optimizer_step += 1
+            now = time.perf_counter()
+            if last_step_time is not None:
+                elapsed = now - last_step_time
+                s_per_step = (elapsed if s_per_step is None
+                              else 0.1 * elapsed + 0.9 * s_per_step)
+            last_step_time = now
+            if ctx.is_main_process:
+                logger.warning(
+                    "step {}/{} | grad_norm 非有限({:.2e})，已丢弃本步"
+                    " | micro steps {}",
+                    optimizer_step,
+                    max_steps,
+                    grad_norm.item(),
+                    micro_step,
+                )
+            continue
         optimizer.step()
         if ema_tracker is not None:
             # EMA 在参数更新后滑动（openpi 语义：decay*ema + (1-decay)*new）

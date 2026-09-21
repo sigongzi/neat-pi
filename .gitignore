@@ -25,3 +25,6 @@ ref/
 
 # 本地环境变量
 .env
+# Claude 会话产物与计划文档（本地专用，不入库）
+.claude/
+/docs/plans/
