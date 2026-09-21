@@ -321,6 +321,7 @@ def run_training(config_path: str) -> None:
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=cfg.training.lr,
+            betas=(cfg.training.adamw_beta1, cfg.training.adamw_beta2),
             weight_decay=cfg.training.weight_decay,
         )
         if resume_checkpoint is not None:

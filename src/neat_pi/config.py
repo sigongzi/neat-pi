@@ -128,6 +128,9 @@ class TrainingConfig:
     warmup_steps: int = 1000    # 线性 warmup 步数（openpi 默认）
     ema_decay: float | None = 0.999  # EMA 影子权重衰减（openpi pi05 实配）；null 关闭
     weight_decay: float = 0.0
+    # AdamW 动量系数：无代码默认，必须在 YAML 显式声明（Config.validate 强制）
+    adamw_beta1: float | None = None
+    adamw_beta2: float | None = None
     log_every: int = 10
     save_every: int = 1000
     keep_last_n: int = 0  # 按数量保留最近 n 个 checkpoint；0 = 不按数量保留
@@ -161,6 +164,14 @@ class TrainingConfig:
                             ("lr_end", self.lr_end)):
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"training.{name} 必须是有限非负数，实际为 {value!r}")
+        for name, value in (("adamw_beta1", self.adamw_beta1),
+                            ("adamw_beta2", self.adamw_beta2)):
+            if value is None:
+                continue  # 缺失由 Config.validate_required 统一拦截（见其注释）
+            if (not isinstance(value, (int, float)) or not math.isfinite(value)
+                    or not 0.0 <= value < 1.0):
+                raise ValueError(
+                    f"training.{name} 必须是 [0, 1) 内的有限数，实际为 {value!r}")
         if self.ema_decay is not None and (
                 not isinstance(self.ema_decay, (int, float))
                 or not math.isfinite(self.ema_decay)
@@ -188,6 +199,19 @@ class TrainingConfig:
             raise ValueError(
                 f"training.output_dir 必须是非空路径字符串，实际为 {self.output_dir!r}")
 
+    def validate_required(self) -> None:
+        """校验必须在 YAML 显式声明、无代码默认的字段。
+
+        不放进 validate()：load_config 先构造默认 Config() 再覆盖 YAML 值，
+        而 __post_init__ 会立刻跑 validate()——必填检查放在那里会让默认
+        构造（default_factory）直接失败，加载链路断裂。本方法只由
+        Config.validate（即 load_config 路径）调用。
+        """
+        for name in ("adamw_beta1", "adamw_beta2"):
+            if getattr(self, name) is None:
+                raise ValueError(
+                    f"training.{name} 必须在 YAML 中显式填写（无默认值）")
+
     def __post_init__(self) -> None:
         """构造时校验训练参数并同步校验 FSDP 子配置。"""
         self.fsdp.validate()
@@ -207,6 +231,7 @@ class Config:
         """校验完整顶层配置。"""
         self.training.fsdp.validate()
         self.training.validate()
+        self.training.validate_required()
 
 
 def _update_dataclass(obj: Any, values: dict[str, Any]) -> None:

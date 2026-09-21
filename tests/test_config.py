@@ -64,6 +64,8 @@ def test_load_config_persists_fsdp_and_training_fields(tmp_path: Path) -> None:
     raw["training"]["gradient_clip_norm"] = 0.5
     raw["training"]["grad_accum_steps"] = 2
     raw["training"]["resume"] = True
+    raw["training"]["adamw_beta1"] = 0.9
+    raw["training"]["adamw_beta2"] = 0.95
     path = tmp_path / "training.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
@@ -74,6 +76,26 @@ def test_load_config_persists_fsdp_and_training_fields(tmp_path: Path) -> None:
     assert cfg.training.gradient_clip_norm == 0.5
     assert cfg.training.grad_accum_steps == 2
     assert cfg.training.resume is True
+    assert cfg.training.adamw_beta1 == 0.9
+    assert cfg.training.adamw_beta2 == 0.95
+
+
+def test_adamw_betas_must_be_explicit_in_yaml(tmp_path: Path) -> None:
+    """AdamW beta1/beta2 无代码默认：YAML 未填写时 load_config 直接失败。"""
+    training = TrainingConfig()
+    with pytest.raises(ValueError, match="adamw_beta1"):
+        training.validate_required()
+    training.adamw_beta1 = 0.9
+    with pytest.raises(ValueError, match="adamw_beta2"):
+        training.validate_required()
+
+    # 端到端：从现有配置里删掉 betas 再加载，必须报错而不是静默用默认值
+    raw = _load_yaml(ROOT / "configs" / "pi05_libero.yaml")
+    del raw["training"]["adamw_beta1"]
+    path = tmp_path / "missing_beta.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="adamw_beta1"):
+        load_config(path)
 
 
 @pytest.mark.parametrize("field,value", [
@@ -115,6 +137,12 @@ def test_forward_prefetch_conflicts_with_activation_checkpointing() -> None:
     ("ema_decay", -0.1),
     ("ema_decay", "0.9"),
     ("weight_decay", "0"),
+    ("adamw_beta1", 1.0),
+    ("adamw_beta1", -0.1),
+    ("adamw_beta1", "0.9"),
+    ("adamw_beta2", 1.0),
+    ("adamw_beta2", -0.1),
+    ("adamw_beta2", "0.999"),
     ("gradient_clip_norm", 0),
     ("use_dummy_model", 1),
     ("resume", "false"),

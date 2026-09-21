@@ -42,6 +42,10 @@ training:
   # checkpoint 双份落盘（model.safetensors + ema.safetensors）；null 关闭
   ema_decay: 0.999
   weight_decay: 0.0
+  # AdamW 动量系数：必填（无代码默认，缺失时 load_config 直接报错）。
+  # 0.9/0.999 为 PyTorch 原隐式默认，行为与显式化前一致；openpi 用 0.9/0.95
+  adamw_beta1: 0.9
+  adamw_beta2: 0.999
   log_every: 10
   save_every: 1000
   # checkpoint 保留策略（prune_checkpoints）：只留最近 3 份 + 里程碑，
